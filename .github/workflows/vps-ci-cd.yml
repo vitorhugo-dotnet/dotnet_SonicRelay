@@ -1,0 +1,241 @@
+name: VPS CI/CD
+
+on:
+  push:
+    branches:
+      - main
+      - codex/define-backend-architecture-for-sonicrelay
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      deploy:
+        description: Deploy to the VPS after publishing the image
+        required: true
+        type: boolean
+        default: true
+
+env:
+  DOTNET_VERSION: 10.0.x
+  DOTNET_MAJOR: "10.0"
+  CONFIGURATION: Release
+  APP_PROJECT: src/SonicRelay.Api/SonicRelay.Api.csproj
+  IMAGE_NAME: ghcr.io/vitorhugo-java/sonicrelay-api
+
+concurrency:
+  group: sonicrelay-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      has_dotnet_project: ${{ steps.resolve.outputs.has_dotnet_project }}
+      app_project: ${{ steps.resolve.outputs.app_project }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve .NET project
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          configured_project="${APP_PROJECT:-}"
+
+          if [[ -n "$configured_project" && -f "$configured_project" ]]; then
+            echo "has_dotnet_project=true" >> "$GITHUB_OUTPUT"
+            echo "app_project=$configured_project" >> "$GITHUB_OUTPUT"
+            echo "Using configured project: $configured_project"
+            exit 0
+          fi
+
+          mapfile -t projects < <(find . -type f -name '*.csproj' \
+            ! -iname '*test*.csproj' \
+            ! -iname '*tests*.csproj' \
+            ! -path '*/bin/*' \
+            ! -path '*/obj/*' \
+            | sort)
+
+          if (( ${#projects[@]} == 0 )); then
+            echo "::warning::No .NET project found yet. Build/Test/Image/Deploy will be skipped until a .csproj exists."
+            echo "has_dotnet_project=false" >> "$GITHUB_OUTPUT"
+            echo "app_project=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_dotnet_project=true" >> "$GITHUB_OUTPUT"
+          echo "app_project=${projects[0]#./}" >> "$GITHUB_OUTPUT"
+          echo "Using discovered project: ${projects[0]#./}"
+
+      - name: Setup .NET
+        if: steps.resolve.outputs.has_dotnet_project == 'true'
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore
+        if: steps.resolve.outputs.has_dotnet_project == 'true'
+        run: dotnet restore "${{ steps.resolve.outputs.app_project }}"
+
+      - name: Build
+        if: steps.resolve.outputs.has_dotnet_project == 'true'
+        run: dotnet build "${{ steps.resolve.outputs.app_project }}" --configuration "${{ env.CONFIGURATION }}" --no-restore
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: build
+    if: needs.build.outputs.has_dotnet_project == 'true'
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Run tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t test_projects < <(find . -type f \( -iname '*Test.csproj' -o -iname '*Tests.csproj' \) \
+            ! -path '*/bin/*' \
+            ! -path '*/obj/*' \
+            | sort)
+
+          if (( ${#test_projects[@]} == 0 )); then
+            echo "::warning::No test project found. Skipping dotnet test for now."
+            exit 0
+          fi
+
+          mkdir -p TestResults
+          for test_project in "${test_projects[@]}"; do
+            echo "Testing ${test_project#./}"
+            dotnet restore "$test_project"
+            dotnet test "$test_project" \
+              --configuration "${{ env.CONFIGURATION }}" \
+              --no-restore \
+              --logger "trx" \
+              --results-directory TestResults
+          done
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v5
+        with:
+          name: test-results
+          path: TestResults
+          if-no-files-found: ignore
+
+  publish_image:
+    name: Publish public GHCR image
+    runs-on: ubuntu-latest
+    needs:
+      - build
+      - test
+    if: github.event_name != 'pull_request' && needs.build.outputs.has_dotnet_project == 'true'
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      digest: ${{ steps.push.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve image tags
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${IMAGE_NAME}:sha-${GITHUB_SHA}"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          {
+            echo "tags<<EOF"
+            echo "$image"
+            if [[ "${GITHUB_REF}" == "refs/heads/main" ]]; then
+              echo "${IMAGE_NAME}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          build-args: |
+            APP_PROJECT=${{ needs.build.outputs.app_project }}
+            DOTNET_MAJOR=${{ env.DOTNET_MAJOR }}
+          tags: ${{ steps.image.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=SonicRelay API
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to VPS over SSH
+    runs-on: ubuntu-latest
+    needs: publish_image
+    if: >-
+      ${{
+        needs.publish_image.result == 'success' &&
+        (
+          (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+          (github.event_name == 'workflow_dispatch' && inputs.deploy == true)
+        )
+      }}
+    environment: production
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Copy deployment files
+        uses: appleboy/scp-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          source: "deploy/docker-compose.prod.yml,deploy/deploy.sh"
+          target: ${{ secrets.VPS_APP_DIR || '/opt/sonicrelay' }}
+          strip_components: 1
+
+      - name: Run deployment
+        uses: appleboy/ssh-action@v1
+        env:
+          IMAGE: ${{ needs.publish_image.outputs.image }}
+          APP_DIR: ${{ secrets.VPS_APP_DIR || '/opt/sonicrelay' }}
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_PORT || 22 }}
+          envs: IMAGE,APP_DIR
+          script: |
+            cd "$APP_DIR"
+            chmod +x deploy.sh
+            ./deploy.sh

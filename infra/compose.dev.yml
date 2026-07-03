@@ -1,0 +1,57 @@
+services:
+  api:
+    profiles: ["dev"]
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      Logging__LogLevel__Default: Information
+      Logging__LogLevel__Microsoft.AspNetCore: Warning
+      Swagger__Enabled: "true"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../services/SonicRelay.Api:/src/services/SonicRelay.Api
+
+  postgres:
+    profiles: ["dev"]
+    ports:
+      - "5432:5432"
+
+  redis:
+    profiles: ["dev"]
+    ports:
+      - "6379:6379"
+
+  coturn:
+    profiles: ["dev"]
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+
+  pgadmin:
+    profiles: ["dev", "dev-tools"]
+    image: dpage/pgadmin4:latest
+    container_name: sonicrelay-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@local.dev}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+    ports:
+      - "5050:80"
+    networks:
+      - sonicrelay
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  redisinsight:
+    profiles: ["dev", "dev-tools"]
+    image: redis/redisinsight:latest
+    container_name: sonicrelay-redisinsight
+    ports:
+      - "5540:5540"
+    networks:
+      - sonicrelay
+    depends_on:
+      redis:
+        condition: service_healthy

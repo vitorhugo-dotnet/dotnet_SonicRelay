@@ -1,0 +1,14 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SonicRelay.Api", "services\SonicRelay.Api\SonicRelay.Api.csproj", "{E6D4D86E-3900-4B6E-8DE4-605946462B90}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SonicRelay.Domain", "src\SonicRelay.Domain\SonicRelay.Domain.csproj", "{FD3C8645-338F-4301-9732-1A6C3441F677}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SonicRelay.Application", "src\SonicRelay.Application\SonicRelay.Application.csproj", "{8D5B4C39-9C0E-4A8B-9621-DA2A36899F5E}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SonicRelay.Infrastructure", "src\SonicRelay.Infrastructure\SonicRelay.Infrastructure.csproj", "{33F7C27F-70F4-47E7-96F3-68E1D24D9E5E}"
+EndProject
+Global
+EndGlobal

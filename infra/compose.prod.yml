@@ -1,0 +1,46 @@
+services:
+  api:
+    profiles: ["prod"]
+    image: ${API_IMAGE:-ghcr.io/vitorhugo-java/sonicrelay-api:latest}
+    build: null
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      Swagger__Enabled: "false"
+      Serilog__MinimumLevel: Information
+    expose:
+      - "8080"
+    restart: always
+
+  postgres:
+    profiles: ["prod"]
+    ports: []
+    restart: always
+
+  redis:
+    profiles: ["prod"]
+    ports: []
+    restart: always
+
+  coturn:
+    profiles: ["prod"]
+    ports:
+      - "3478:3478/udp"
+      - "3478:3478/tcp"
+      - "5349:5349/tcp"
+      - "49160-49200:49160-49200/udp"
+    restart: always
+
+  nginx:
+    profiles: ["prod"]
+    image: nginx:1.27-alpine
+    container_name: sonicrelay-nginx
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      - api
+    networks:
+      - sonicrelay
+    restart: always

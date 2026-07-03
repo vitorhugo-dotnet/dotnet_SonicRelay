@@ -1,0 +1,79 @@
+name: ${COMPOSE_PROJECT_NAME:-sonicrelay}
+
+services:
+  api:
+    container_name: sonicrelay-api
+    build:
+      context: ../
+      dockerfile: services/SonicRelay.Api/Dockerfile
+    environment:
+      ASPNETCORE_URLS: http://+:8080
+      ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}
+      ConnectionStrings__Postgres: Host=postgres;Port=5432;Database=${POSTGRES_DB:-sonicrelay};Username=${POSTGRES_USER:-sonicrelay};Password=${POSTGRES_PASSWORD:-change-me}
+      Redis__ConnectionString: redis:6379,password=${REDIS_PASSWORD:-change-me},abortConnect=false
+      Auth__AccessTokenMinutes: ${AUTH_ACCESS_TOKEN_MINUTES:-15}
+      Auth__RefreshTokenDays: ${AUTH_REFRESH_TOKEN_DAYS:-30}
+      Sessions__CodeTtlMinutes: ${SESSION_CODE_TTL_MINUTES:-10}
+      Sessions__MaxViewersPerSession: ${SESSION_MAX_VIEWERS:-3}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - sonicrelay
+    restart: unless-stopped
+
+  postgres:
+    container_name: sonicrelay-postgres
+    image: postgres:${POSTGRES_VERSION:-17-alpine}
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sonicrelay}
+      POSTGRES_USER: ${POSTGRES_USER:-sonicrelay}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - sonicrelay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sonicrelay} -d ${POSTGRES_DB:-sonicrelay}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    container_name: sonicrelay-redis
+    image: redis:${REDIS_VERSION:-7-alpine}
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass ${REDIS_PASSWORD:-change-me}
+    volumes:
+      - redis_data:/data
+    networks:
+      - sonicrelay
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-change-me}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  coturn:
+    container_name: sonicrelay-coturn
+    image: coturn/coturn:${COTURN_VERSION:-latest}
+    command: ["-c", "/etc/coturn/turnserver.conf"]
+    volumes:
+      - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    networks:
+      - sonicrelay
+    restart: unless-stopped
+
+networks:
+  sonicrelay:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
