@@ -1,0 +1,15 @@
+services:
+  api:
+    image: ${IMAGE:-ghcr.io/vitorhugo-java/sonicrelay-api:latest}
+    container_name: sonicrelay-api
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "${API_BIND:-127.0.0.1:8080}:8080"
+    networks:
+      - sonicrelay
+
+networks:
+  sonicrelay:
+    name: sonicrelay
