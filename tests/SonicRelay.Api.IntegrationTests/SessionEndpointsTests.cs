@@ -203,15 +203,25 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
             db.SessionParticipants.AddRange(
                 new SessionParticipant
                 {
-                    Id = staleId, SessionId = sessionId, UserId = session.OwnerUserId, DeviceId = session.SourceDeviceId,
-                    Role = ParticipantRoles.Viewer, Status = ParticipantStatuses.Disconnected,
-                    JoinedAt = now.AddDays(-3), LeftAt = now.AddDays(-2)
+                    Id = staleId,
+                    SessionId = sessionId,
+                    UserId = session.OwnerUserId,
+                    DeviceId = session.SourceDeviceId,
+                    Role = ParticipantRoles.Viewer,
+                    Status = ParticipantStatuses.Disconnected,
+                    JoinedAt = now.AddDays(-3),
+                    LeftAt = now.AddDays(-2)
                 },
                 new SessionParticipant
                 {
-                    Id = recentId, SessionId = sessionId, UserId = session.OwnerUserId, DeviceId = session.SourceDeviceId,
-                    Role = ParticipantRoles.Viewer, Status = ParticipantStatuses.Disconnected,
-                    JoinedAt = now.AddHours(-2), LeftAt = now.AddHours(-1)
+                    Id = recentId,
+                    SessionId = sessionId,
+                    UserId = session.OwnerUserId,
+                    DeviceId = session.SourceDeviceId,
+                    Role = ParticipantRoles.Viewer,
+                    Status = ParticipantStatuses.Disconnected,
+                    JoinedAt = now.AddHours(-2),
+                    LeftAt = now.AddHours(-1)
                 });
             await db.SaveChangesAsync();
         }
@@ -281,9 +291,13 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         db.Devices.Add(new Device
         {
-            Id = id, OwnerUserId = ownerUserId, Name = "Test device", Type = type,
+            Id = id,
+            OwnerUserId = ownerUserId,
+            Name = "Test device",
+            Type = type,
             Platform = type == DeviceTypes.WindowsPublisher ? DevicePlatforms.Windows : DevicePlatforms.Android,
-            Revoked = revoked, CreatedAt = DateTimeOffset.UtcNow
+            Revoked = revoked,
+            CreatedAt = DateTimeOffset.UtcNow
         });
         await db.SaveChangesAsync();
         return id;

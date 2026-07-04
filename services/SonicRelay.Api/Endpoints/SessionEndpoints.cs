@@ -43,14 +43,23 @@ public static class SessionEndpoints
         var ttl = CodeTtl(configuration);
         var session = new StreamSession
         {
-            Id = Guid.NewGuid(), OwnerUserId = user.Id, SourceDeviceId = request.SourceDeviceId,
-            MaxViewers = maxViewers, CodeExpiresAt = now.Add(ttl), CreatedAt = now
+            Id = Guid.NewGuid(),
+            OwnerUserId = user.Id,
+            SourceDeviceId = request.SourceDeviceId,
+            MaxViewers = maxViewers,
+            CodeExpiresAt = now.Add(ttl),
+            CreatedAt = now
         };
         db.StreamSessions.Add(session);
         db.SessionParticipants.Add(new SessionParticipant
         {
-            Id = Guid.NewGuid(), SessionId = session.Id, UserId = user.Id, DeviceId = request.SourceDeviceId,
-            Role = ParticipantRoles.Publisher, Status = ParticipantStatuses.Connected, JoinedAt = now
+            Id = Guid.NewGuid(),
+            SessionId = session.Id,
+            UserId = user.Id,
+            DeviceId = request.SourceDeviceId,
+            Role = ParticipantRoles.Publisher,
+            Status = ParticipantStatuses.Connected,
+            JoinedAt = now
         });
         await db.SaveChangesAsync(ct);
 
@@ -72,8 +81,15 @@ public static class SessionEndpoints
             .OrderByDescending(x => x.CreatedAt)
             .Select(x => new
             {
-                x.Id, x.OwnerUserId, x.SourceDeviceId, x.Status, x.MaxViewers, x.CodeExpiresAt,
-                x.StartedAt, x.EndedAt, x.CreatedAt,
+                x.Id,
+                x.OwnerUserId,
+                x.SourceDeviceId,
+                x.Status,
+                x.MaxViewers,
+                x.CodeExpiresAt,
+                x.StartedAt,
+                x.EndedAt,
+                x.CreatedAt,
                 ViewerCount = db.SessionParticipants.Count(p => p.SessionId == x.Id && p.Role == ParticipantRoles.Viewer
                     && p.Status == ParticipantStatuses.Connected)
             }).ToListAsync(ct);
@@ -191,8 +207,13 @@ public static class SessionEndpoints
 
         var participant = new SessionParticipant
         {
-            Id = Guid.NewGuid(), SessionId = session.Id, UserId = user.Id, DeviceId = request.DeviceId,
-            Role = ParticipantRoles.Viewer, Status = ParticipantStatuses.Connected, JoinedAt = now
+            Id = Guid.NewGuid(),
+            SessionId = session.Id,
+            UserId = user.Id,
+            DeviceId = request.DeviceId,
+            Role = ParticipantRoles.Viewer,
+            Status = ParticipantStatuses.Connected,
+            JoinedAt = now
         };
         db.SessionParticipants.Add(participant);
         if (session.Status == SessionStatuses.Waiting)
@@ -211,8 +232,16 @@ public static class SessionEndpoints
 
     private static object ToResponse(StreamSession session, string? code = null) => new
     {
-        session.Id, session.OwnerUserId, session.SourceDeviceId, session.Status, session.MaxViewers,
-        session.CodeExpiresAt, session.StartedAt, session.EndedAt, session.CreatedAt, code
+        session.Id,
+        session.OwnerUserId,
+        session.SourceDeviceId,
+        session.Status,
+        session.MaxViewers,
+        session.CodeExpiresAt,
+        session.StartedAt,
+        session.EndedAt,
+        session.CreatedAt,
+        code
     };
 
     private static TimeSpan CodeTtl(IConfiguration configuration) =>
