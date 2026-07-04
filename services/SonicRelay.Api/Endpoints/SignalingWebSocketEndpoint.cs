@@ -28,6 +28,7 @@ public static class SignalingWebSocketEndpoint
     private static async Task HandleAsync(HttpContext context, UserManager<ApplicationUser> userManager,
         AppDbContext db, IConnectionRegistry registry, ILoggerFactory loggerFactory)
     {
+        var logger = loggerFactory.CreateLogger("SonicRelay.Signaling");
         if (!context.WebSockets.IsWebSocketRequest)
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
@@ -58,6 +59,8 @@ public static class SignalingWebSocketEndpoint
         if (session.Status is SessionStatuses.Ended or SessionStatuses.Expired
             || session.CodeExpiresAt <= DateTimeOffset.UtcNow)
         {
+            logger.LogInformation("Rejected signaling connection to terminal session {SessionId} with status {SessionStatus}",
+                sessionId, session.Status);
             context.Response.StatusCode = StatusCodes.Status410Gone;
             return;
         }
@@ -94,7 +97,6 @@ public static class SignalingWebSocketEndpoint
             }
         }
         var connectionId = Guid.NewGuid().ToString("N");
-        var logger = loggerFactory.CreateLogger("SonicRelay.Signaling");
         await registry.RegisterAsync(new ConnectionDescriptor(
             connectionId, sessionId, participant.Id, user.Id, deviceId, participant.Role,
             DateTimeOffset.UtcNow,
@@ -105,6 +107,9 @@ public static class SignalingWebSocketEndpoint
         participant.Status = ParticipantStatuses.Connected;
         participant.LeftAt = null;
         await db.SaveChangesAsync(context.RequestAborted);
+        logger.LogInformation(
+            "Connected signaling participant {ParticipantId} to session {SessionId} with connection {ConnectionId}",
+            participant.Id, sessionId, connectionId);
 
         try
         {
@@ -121,6 +126,9 @@ public static class SignalingWebSocketEndpoint
         {
             await registry.UnregisterAsync(connectionId, CancellationToken.None);
             await MarkDisconnectedAsync(db, participant.Id, connectionId);
+            logger.LogInformation(
+                "Disconnected signaling participant {ParticipantId} from session {SessionId} with connection {ConnectionId}",
+                participant.Id, sessionId, connectionId);
             await BroadcastAsync(registry, sessionId, participant.Id, new
             {
                 type = "session.left",
@@ -163,12 +171,13 @@ public static class SignalingWebSocketEndpoint
 
             var message = await receiveTask;
             if (message is null) return;
-            await HandleMessageAsync(sendAsync, sessionId, participantId, message, registry, logger, ct);
+            if (!await HandleMessageAsync(sendAsync, sessionId, participantId, message, db, registry, logger, ct))
+                return;
         }
     }
 
-    private static async Task HandleMessageAsync(Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendAsync,
-        Guid sessionId, Guid participantId, byte[] message, IConnectionRegistry registry, ILogger logger,
+    private static async Task<bool> HandleMessageAsync(Func<ReadOnlyMemory<byte>, CancellationToken, Task> sendAsync,
+        Guid sessionId, Guid participantId, byte[] message, AppDbContext db, IConnectionRegistry registry, ILogger logger,
         CancellationToken ct)
     {
         JsonDocument document;
@@ -179,7 +188,7 @@ public static class SignalingWebSocketEndpoint
         catch (JsonException)
         {
             await SendErrorAsync(sendAsync, "invalid_message", ct);
-            return;
+            return true;
         }
 
         using (document)
@@ -188,24 +197,32 @@ public static class SignalingWebSocketEndpoint
             if (!root.TryGetProperty("type", out var typeElement) || typeElement.ValueKind != JsonValueKind.String)
             {
                 await SendErrorAsync(sendAsync, "invalid_message", ct);
-                return;
+                return true;
             }
 
             var type = typeElement.GetString()!;
             if (type == "ping")
             {
                 await SendAsync(sendAsync, new { type = "pong" }, ct);
-                return;
+                return true;
             }
             if (!RoutedMessageTypes.Contains(type))
             {
                 await SendErrorAsync(sendAsync, "unsupported_message_type", ct);
-                return;
+                return true;
             }
             if (!root.TryGetProperty("to", out var toElement) || !toElement.TryGetGuid(out var toParticipantId))
             {
                 await SendErrorAsync(sendAsync, "invalid_recipient", ct);
-                return;
+                return true;
+            }
+
+            if (await SessionEndedAsync(db, sessionId, ct))
+            {
+                logger.LogInformation("Closing signaling for terminal session {SessionId} and participant {ParticipantId}",
+                    sessionId, participantId);
+                await SendAsync(sendAsync, new { type = "session.ended" }, ct);
+                return false;
             }
 
             var payload = root.TryGetProperty("payload", out var payloadElement)
@@ -222,12 +239,13 @@ public static class SignalingWebSocketEndpoint
             if (!delivered)
             {
                 await SendErrorAsync(sendAsync, "participant_not_found", ct);
-                return;
+                return true;
             }
 
             // Deliberately log only routing metadata. SDP and ICE payloads are never logged.
             logger.LogDebug("Routed signaling message {MessageType} in session {SessionId} from {FromParticipantId} to {ToParticipantId}",
                 type, sessionId, participantId, toParticipantId);
+            return true;
         }
     }
 

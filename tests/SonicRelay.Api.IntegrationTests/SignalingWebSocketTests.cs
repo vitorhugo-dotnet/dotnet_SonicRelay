@@ -56,6 +56,44 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ReceiveAsync(receiverSocket, timeout.Token));
     }
 
+    [Theory]
+    [InlineData(SessionStatuses.Ended, false)]
+    [InlineData(SessionStatuses.Expired, false)]
+    [InlineData(SessionStatuses.Active, true)]
+    public async Task Signaling_rejects_terminal_or_elapsed_sessions(string status, bool elapsed)
+    {
+        var participant = await CreateParticipantAsync($"terminal-{status}-{elapsed}");
+        await SetSessionStateAsync(participant.SessionId, status,
+            elapsed ? DateTimeOffset.UtcNow.AddMinutes(-1) : DateTimeOffset.UtcNow.AddMinutes(5));
+        var client = _factory.Server.CreateWebSocketClient();
+        client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {participant.AccessToken}";
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
+            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={participant.DeviceId}"),
+            CancellationToken.None));
+
+        Assert.Contains("410", exception.Message);
+    }
+
+    [Fact]
+    public async Task Signaling_does_not_route_a_frame_after_the_session_ends()
+    {
+        var participant = await CreateParticipantAsync("terminal-route");
+        using var socket = await ConnectAsync(participant);
+        await ReceiveAsync(socket);
+        await SetSessionStateAsync(participant.SessionId, SessionStatuses.Ended, DateTimeOffset.UtcNow.AddMinutes(5));
+
+        await SendAsync(socket, new
+        {
+            type = "webrtc.offer",
+            to = participant.ParticipantId,
+            payload = new { sdp = "must-not-route" }
+        });
+
+        var response = await ReceiveAsync(socket);
+        Assert.Equal("session.ended", response.GetProperty("type").GetString());
+    }
+
     private async Task<TestParticipant> CreateParticipantAsync(string prefix)
     {
         var http = _factory.CreateClient();
@@ -122,6 +160,16 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         return await client.ConnectAsync(
             new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={participant.DeviceId}"),
             CancellationToken.None);
+    }
+
+    private async Task SetSessionStateAsync(Guid sessionId, string status, DateTimeOffset codeExpiresAt)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var session = await db.StreamSessions.SingleAsync(x => x.Id == sessionId);
+        session.Status = status;
+        session.CodeExpiresAt = codeExpiresAt;
+        await db.SaveChangesAsync();
     }
 
     private static async Task SendAsync(WebSocket socket, object message)
