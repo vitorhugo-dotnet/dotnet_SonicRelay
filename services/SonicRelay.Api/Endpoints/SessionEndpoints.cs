@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Application.Abstractions;
 using SonicRelay.Domain.Devices;
@@ -15,18 +16,19 @@ public static class SessionEndpoints
     public static IEndpointRouteBuilder MapSessionEndpoints(this IEndpointRouteBuilder app)
     {
         var group = app.MapGroup("/api/sessions").RequireAuthorization().WithTags("Sessions");
-        group.MapPost("/", CreateAsync).RequireAuthorization("CanCreateSession");
+        group.MapPost("/", CreateAsync).RequireAuthorization("CanCreateSession").RequireRateLimiting("create-session");
         group.MapGet("/active", GetActiveAsync);
         group.MapGet("/{sessionId:guid}", GetAsync);
         group.MapPost("/{sessionId:guid}/end", EndAsync);
-        group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync);
-        group.MapPost("/join", JoinAsync).RequireAuthorization("CanJoinSession");
+        group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync).RequireRateLimiting("rotate-code");
+        group.MapPost("/join", JoinAsync).RequireAuthorization("CanJoinSession").RequireRateLimiting("join-session");
         return app;
     }
 
     private static async Task<IResult> CreateAsync(CreateSessionRequest request,
         System.Security.Claims.ClaimsPrincipal principal, UserManager<ApplicationUser> userManager,
-        AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration, CancellationToken ct)
+        AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory,
+        CancellationToken ct)
     {
         var user = await userManager.GetUserAsync(principal);
         if (user is null) return Results.Unauthorized();
@@ -54,6 +56,8 @@ public static class SessionEndpoints
 
         var code = GenerateCode();
         await codeStore.StoreAsync(HashCode(code, configuration), session.Id, ttl, ct);
+        loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+            "Created session {SessionId} for user {UserId} from device {DeviceId}", session.Id, user.Id, request.SourceDeviceId);
         return Results.Created($"/api/sessions/{session.Id}", ToResponse(session, code));
     }
 
@@ -89,7 +93,8 @@ public static class SessionEndpoints
     }
 
     private static async Task<IResult> EndAsync(Guid sessionId, System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager, AppDbContext db, ISessionCodeStore codeStore, CancellationToken ct)
+        UserManager<ApplicationUser> userManager, AppDbContext db, ISessionCodeStore codeStore,
+        ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var user = await userManager.GetUserAsync(principal);
         if (user is null) return Results.Unauthorized();
@@ -109,13 +114,16 @@ public static class SessionEndpoints
             }
             await db.SaveChangesAsync(ct);
             await codeStore.RemoveAsync(sessionId, ct);
+            loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+                "Ended session {SessionId} for user {UserId}; disconnected {ParticipantCount} participants",
+                sessionId, user.Id, connected.Count);
         }
         return Results.Ok(ToResponse(session));
     }
 
     private static async Task<IResult> RotateCodeAsync(Guid sessionId, System.Security.Claims.ClaimsPrincipal principal,
         UserManager<ApplicationUser> userManager, AppDbContext db, ISessionCodeStore codeStore,
-        IConfiguration configuration, CancellationToken ct)
+        IConfiguration configuration, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var user = await userManager.GetUserAsync(principal);
         if (user is null) return Results.Unauthorized();
@@ -128,12 +136,15 @@ public static class SessionEndpoints
         session.CodeExpiresAt = DateTimeOffset.UtcNow.Add(ttl);
         await db.SaveChangesAsync(ct);
         await codeStore.StoreAsync(HashCode(code, configuration), session.Id, ttl, ct);
+        loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+            "Rotated join code for session {SessionId} by user {UserId}", session.Id, user.Id);
         return Results.Ok(ToResponse(session, code));
     }
 
     private static async Task<IResult> JoinAsync(JoinSessionRequest request,
         System.Security.Claims.ClaimsPrincipal principal, UserManager<ApplicationUser> userManager,
-        AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration, CancellationToken ct)
+        AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory,
+        CancellationToken ct)
     {
         var user = await userManager.GetUserAsync(principal);
         if (user is null) return Results.Unauthorized();
@@ -153,6 +164,8 @@ public static class SessionEndpoints
                 session.Status = SessionStatuses.Expired;
                 await db.SaveChangesAsync(ct);
                 await codeStore.RemoveAsync(session.Id, ct);
+                loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+                    "Marked session {SessionId} expired during join", session.Id);
             }
             return InvalidCode();
         }
@@ -166,6 +179,9 @@ public static class SessionEndpoints
             existing.Status = ParticipantStatuses.Connected;
             existing.LeftAt = null;
             await db.SaveChangesAsync(ct);
+            loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+                "Reconnected participant {ParticipantId} to session {SessionId} for user {UserId}",
+                existing.Id, session.Id, user.Id);
             return Results.Ok(ToResponse(session));
         }
 
@@ -173,17 +189,21 @@ public static class SessionEndpoints
             && x.Role == ParticipantRoles.Viewer && x.Status == ParticipantStatuses.Connected, ct);
         if (viewerCount >= session.MaxViewers) return Results.Conflict(new { error = "Session viewer limit reached." });
 
-        db.SessionParticipants.Add(new SessionParticipant
+        var participant = new SessionParticipant
         {
             Id = Guid.NewGuid(), SessionId = session.Id, UserId = user.Id, DeviceId = request.DeviceId,
             Role = ParticipantRoles.Viewer, Status = ParticipantStatuses.Connected, JoinedAt = now
-        });
+        };
+        db.SessionParticipants.Add(participant);
         if (session.Status == SessionStatuses.Waiting)
         {
             session.Status = SessionStatuses.Active;
             session.StartedAt = now;
         }
         await db.SaveChangesAsync(ct);
+        loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+            "Joined session {SessionId} as participant {ParticipantId} for user {UserId} from device {DeviceId}",
+            session.Id, participant.Id, user.Id, request.DeviceId);
         return Results.Ok(ToResponse(session));
     }
 

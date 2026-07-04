@@ -118,6 +118,69 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
+    public async Task Create_is_rate_limited_per_user()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimits:CreateSession:PermitLimit"] = "1"
+        });
+        var owner = await CreateUserAsync("limited-create", factory);
+        var firstDevice = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher, factory);
+        var secondDevice = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher, factory);
+
+        var accepted = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = firstDevice, maxViewers = 2 });
+        var rejected = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = secondDevice, maxViewers = 2 });
+
+        Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
+
+        var other = await CreateUserAsync("limited-create-other", factory);
+        var otherDevice = await AddDeviceAsync(other.UserId, false, DeviceTypes.WindowsPublisher, factory);
+        Assert.Equal(HttpStatusCode.Created,
+            (await other.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = otherDevice, maxViewers = 2 })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_is_rate_limited_per_user()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimits:JoinSession:PermitLimit"] = "1"
+        });
+        var (_, _, code) = await CreateSessionAsync("limited-join-owner", 3, factory);
+        var viewer = await CreateUserAsync("limited-join", factory);
+        var firstDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer, factory);
+        var secondDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer, factory);
+
+        var accepted = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = firstDevice });
+        var rejected = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = secondDevice });
+
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
+
+        var other = await CreateUserAsync("limited-join-other", factory);
+        var otherDevice = await AddDeviceAsync(other.UserId, false, DeviceTypes.FlutterViewer, factory);
+        Assert.Equal(HttpStatusCode.OK,
+            (await other.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = otherDevice })).StatusCode);
+    }
+
+    [Fact]
+    public async Task Rotate_code_is_rate_limited()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["RateLimits:RotateCode:PermitLimit"] = "1"
+        });
+        var (owner, sessionId, _) = await CreateSessionAsync("limited-rotate", 2, factory);
+
+        var accepted = await owner.Client.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+        var rejected = await owner.Client.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+
+        Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
+        Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
+    }
+
+    [Fact]
     public async Task Owner_can_list_get_and_end_a_session()
     {
         var (owner, sessionId, _) = await CreateSessionAsync("lifecycle-owner", 2);
@@ -133,19 +196,22 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.Equal(SessionStatuses.Ended, ended.GetProperty("status").GetString());
     }
 
-    private async Task<(TestUser Owner, Guid SessionId, string Code)> CreateSessionAsync(string prefix, int maxViewers)
+    private async Task<(TestUser Owner, Guid SessionId, string Code)> CreateSessionAsync(string prefix, int maxViewers,
+        SonicRelayApiFactory? factory = null)
     {
-        var owner = await CreateUserAsync(prefix);
-        var source = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher);
+        factory ??= _factory;
+        var owner = await CreateUserAsync(prefix, factory);
+        var source = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher, factory);
         var response = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = source, maxViewers });
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var body = await ReadJsonAsync(response);
         return (owner, body.GetProperty("id").GetGuid(), body.GetProperty("code").GetString()!);
     }
 
-    private async Task<TestUser> CreateUserAsync(string prefix)
+    private async Task<TestUser> CreateUserAsync(string prefix, SonicRelayApiFactory? factory = null)
     {
-        var client = _factory.CreateClient();
+        factory ??= _factory;
+        var client = factory.CreateClient();
         var email = $"{prefix}-{Guid.NewGuid():N}@example.com";
         var register = await client.PostAsJsonAsync("/auth/register", new { email, password = Password });
         Assert.Equal(HttpStatusCode.OK, register.StatusCode);
@@ -156,10 +222,12 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         return new TestUser(client, profile.GetProperty("id").GetGuid());
     }
 
-    private async Task<Guid> AddDeviceAsync(Guid ownerUserId, bool revoked, string type)
+    private async Task<Guid> AddDeviceAsync(Guid ownerUserId, bool revoked, string type,
+        SonicRelayApiFactory? factory = null)
     {
+        factory ??= _factory;
         var id = Guid.NewGuid();
-        await using var scope = _factory.Services.CreateAsyncScope();
+        await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         db.Devices.Add(new Device
         {
