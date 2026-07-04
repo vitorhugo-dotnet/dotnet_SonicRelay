@@ -45,7 +45,11 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
 
         var revoked = await AddDeviceAsync(owner.UserId, revoked: true, DeviceTypes.WindowsPublisher);
         var revokedResponse = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = revoked, maxViewers = 2 });
-        Assert.Equal(HttpStatusCode.NotFound, revokedResponse.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, revokedResponse.StatusCode);
+
+        var viewerDevice = await AddDeviceAsync(owner.UserId, revoked: false, DeviceTypes.FlutterViewer);
+        var wrongType = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = viewerDevice, maxViewers = 2 });
+        Assert.Equal(HttpStatusCode.Forbidden, wrongType.StatusCode);
     }
 
     [Fact]
@@ -66,6 +70,14 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var foreignDevice = await AddDeviceAsync(owner.UserId, false, DeviceTypes.FlutterViewer);
         var foreign = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = foreignDevice });
         Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+
+        var revokedDevice = await AddDeviceAsync(viewer.UserId, true, DeviceTypes.FlutterViewer);
+        var revoked = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = revokedDevice });
+        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+
+        var publisherDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.WindowsPublisher);
+        var wrongType = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = publisherDevice });
+        Assert.Equal(HttpStatusCode.Forbidden, wrongType.StatusCode);
     }
 
     [Fact]

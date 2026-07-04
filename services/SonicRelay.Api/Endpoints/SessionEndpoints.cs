@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Application.Abstractions;
+using SonicRelay.Api.Services;
 using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Domain.Users;
@@ -35,9 +36,10 @@ public static class SessionEndpoints
         var maxViewers = request.MaxViewers ?? configuration.GetValue("Sessions:MaxViewersPerSession", 3);
         if (maxViewers < 1) return Results.BadRequest(new { error = "MaxViewers must be at least one." });
 
-        var deviceExists = await db.Devices.AnyAsync(x => x.Id == request.SourceDeviceId
-            && x.OwnerUserId == user.Id && !x.Revoked, ct);
-        if (!deviceExists) return Results.NotFound();
+        var eligibility = await DeviceAccess.CheckAsync(db, request.SourceDeviceId, user.Id,
+            DeviceTypes.WindowsPublisher, ct);
+        if (eligibility == DeviceEligibility.Missing) return Results.NotFound();
+        if (eligibility == DeviceEligibility.Ineligible) return Results.Forbid();
 
         var now = DateTimeOffset.UtcNow;
         var ttl = CodeTtl(configuration);
@@ -186,8 +188,10 @@ public static class SessionEndpoints
             return InvalidCode();
         }
 
-        var deviceOwned = await db.Devices.AnyAsync(x => x.Id == request.DeviceId && x.OwnerUserId == user.Id && !x.Revoked, ct);
-        if (!deviceOwned) return Results.NotFound();
+        var eligibility = await DeviceAccess.CheckAsync(db, request.DeviceId, user.Id,
+            DeviceTypes.FlutterViewer, ct);
+        if (eligibility == DeviceEligibility.Missing) return Results.NotFound();
+        if (eligibility == DeviceEligibility.Ineligible) return Results.Forbid();
         var existing = await db.SessionParticipants.SingleOrDefaultAsync(x => x.SessionId == session.Id
             && x.DeviceId == request.DeviceId && x.Role == ParticipantRoles.Viewer, ct);
         if (existing is not null)

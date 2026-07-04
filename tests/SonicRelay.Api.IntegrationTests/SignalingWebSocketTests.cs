@@ -97,6 +97,21 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         Assert.Equal(WebSocketMessageType.Close, close.MessageType);
     }
 
+    [Fact]
+    public async Task Signaling_rejects_a_revoked_device_before_accepting_the_socket()
+    {
+        var participant = await CreateParticipantAsync("revoked");
+        await SetDeviceRevokedAsync(participant.DeviceId);
+        var client = _factory.Server.CreateWebSocketClient();
+        client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {participant.AccessToken}";
+
+        var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
+            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={participant.DeviceId}"),
+            CancellationToken.None));
+
+        Assert.Contains("403", exception.Message);
+    }
+
     private async Task<TestParticipant> CreateParticipantAsync(string prefix)
     {
         var http = _factory.CreateClient();
@@ -172,6 +187,15 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         var session = await db.StreamSessions.SingleAsync(x => x.Id == sessionId);
         session.Status = status;
         session.CodeExpiresAt = codeExpiresAt;
+        await db.SaveChangesAsync();
+    }
+
+    private async Task SetDeviceRevokedAsync(Guid deviceId)
+    {
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var device = await db.Devices.SingleAsync(x => x.Id == deviceId);
+        device.Revoked = true;
         await db.SaveChangesAsync();
     }
 

@@ -3,6 +3,8 @@ using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Application.Abstractions;
+using SonicRelay.Api.Services;
+using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Domain.Users;
 using SonicRelay.Infrastructure.Persistence;
@@ -65,18 +67,25 @@ public static class SignalingWebSocketEndpoint
             return;
         }
 
-        var validDevice = await db.Devices.AsNoTracking().AnyAsync(x =>
-            x.Id == deviceId && x.OwnerUserId == user.Id && !x.Revoked, context.RequestAborted);
-        if (!validDevice)
-        {
-            context.Response.StatusCode = StatusCodes.Status404NotFound;
-            return;
-        }
-
         var participant = await db.SessionParticipants.SingleOrDefaultAsync(x =>
             x.SessionId == sessionId && x.UserId == user.Id && x.DeviceId == deviceId,
             context.RequestAborted);
         if (participant is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
+        var expectedType = participant.Role == ParticipantRoles.Publisher
+            ? DeviceTypes.WindowsPublisher
+            : DeviceTypes.FlutterViewer;
+        var eligibility = await DeviceAccess.CheckAsync(db, deviceId, user.Id, expectedType, context.RequestAborted);
+        if (eligibility == DeviceEligibility.Missing)
+        {
+            context.Response.StatusCode = StatusCodes.Status404NotFound;
+            return;
+        }
+        if (eligibility == DeviceEligibility.Ineligible)
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
