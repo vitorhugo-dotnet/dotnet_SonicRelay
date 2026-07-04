@@ -1,73 +1,142 @@
-# VPS CI/CD over SSH
+# VPS deployment over SSH
 
-This repository deploys SonicRelay through GitHub Actions using this flow:
+GitHub Actions implements this pipeline:
 
 ```text
-Build -> Test -> Publish GHCR image -> Deploy to VPS over SSH
+Build -> Test -> Publish GHCR image -> Deploy API to VPS over SSH
 ```
 
-Each stage is a separate GitHub Actions job, so failures can be retried independently.
+The automated deployment is intentionally API-only. It copies `deploy/docker-compose.prod.yml` and `deploy/deploy.sh`; it does not provision PostgreSQL, Redis, coturn, nginx, certificates or backups. Use the full stack under `infra/` separately, or provide equivalent external services.
+
+## Workflow behavior
+
+`.github/workflows/vps-ci-cd.yml` runs on pull requests, pushes to `main` and its legacy architecture branch, and manual dispatch.
+
+- Build resolves the configured API project; because the configured legacy path currently does not exist, it discovers the first non-test `.csproj` and builds it.
+- Test discovers every `*Test.csproj`/`*Tests.csproj`, restores it and uploads TRX results.
+- Non-PR runs build and publish `ghcr.io/vitorhugo-java/sonicrelay-api:sha-<commit>`.
+- `main` additionally publishes `:latest`.
+- Pushes to `main`, and manual runs with `deploy=true`, deploy the immutable SHA image to the production environment.
 
 ## GitHub secrets
 
-Create these repository secrets:
-
-| Secret | Required | Example |
+| Secret | Required | Default/example |
 | --- | --- | --- |
-| `VPS_HOST` | yes | `203.0.113.10` |
-| `VPS_USER` | yes | `deploy` |
-| `VPS_SSH_KEY` | yes | private key for the deploy user |
-| `VPS_PORT` | no | `22` |
-| `VPS_APP_DIR` | no | `/opt/sonicrelay` |
+| `VPS_HOST` | Yes | VPS hostname or IP |
+| `VPS_USER` | Yes | `deploy` |
+| `VPS_SSH_KEY` | Yes | Private key for the deployment user |
+| `VPS_PORT` | No | `22` |
+| `VPS_APP_DIR` | No | `/opt/sonicrelay` |
 
-The workflow uses `GITHUB_TOKEN` to publish to GHCR.
+`GITHUB_TOKEN` publishes the GHCR package. The package must be public for an unauthenticated VPS pull because the deployment script does not perform `docker login`.
 
 ## VPS bootstrap
 
-Run once on the VPS:
+Install Docker Engine and the Docker Compose plugin, then create a restricted deployment user and directory:
 
 ```bash
 sudo adduser --disabled-password --gecos "" deploy
 sudo usermod -aG docker deploy
 sudo mkdir -p /opt/sonicrelay
 sudo chown -R deploy:deploy /opt/sonicrelay
+sudo install -d -m 700 -o deploy -g deploy /home/deploy/.ssh
 ```
 
-Add your public SSH key to:
+Place the matching public key in `/home/deploy/.ssh/authorized_keys` with mode `600`. Re-login after adding the user to the Docker group.
 
-```bash
-/home/deploy/.ssh/authorized_keys
-```
+## Runtime configuration
 
-The VPS needs Docker Engine with the Docker Compose plugin installed.
-
-## Runtime `.env`
-
-Create `/opt/sonicrelay/.env` on the VPS:
+Create `/opt/sonicrelay/.env` before the first deployment. `deploy.sh` refuses to start without it.
 
 ```env
 ASPNETCORE_ENVIRONMENT=Production
+ASPNETCORE_URLS=http://+:8080
 API_BIND=127.0.0.1:8080
+
+ConnectionStrings__Postgres=Host=postgres.example.internal;Port=5432;Database=sonicrelay;Username=sonicrelay;Password=CHANGE_ME
+Redis__ConnectionString=redis.example.internal:6379,password=CHANGE_ME,abortConnect=false
+
+Auth__AccessTokenMinutes=15
+Auth__RefreshTokenDays=30
+Sessions__CodeTtlMinutes=10
+Sessions__CodeHmacKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET
+Sessions__MaxViewersPerSession=3
+Sessions__CleanupEnabled=true
+Sessions__CleanupIntervalSeconds=60
+Sessions__DisconnectedParticipantRetentionHours=24
+Swagger__Enabled=false
 ```
 
-Keep production secrets only on the VPS. Do not commit them.
+The compose service binds to loopback by default. Put nginx, Caddy or another TLS reverse proxy in front of `127.0.0.1:8080` and forward WebSocket upgrades for `/ws/signaling`.
 
-## GHCR package visibility
+## Database migration
 
-The workflow publishes:
+The application does not call `Database.Migrate()` at startup. Apply migrations as a separate release step using the same PostgreSQL connection before starting a schema-dependent image:
 
-```text
-ghcr.io/vitorhugo-java/sonicrelay-api:sha-<commit>
-ghcr.io/vitorhugo-java/sonicrelay-api:latest
+```bash
+dotnet ef database update \
+  --project src/SonicRelay.Infrastructure/SonicRelay.Infrastructure.csproj \
+  --startup-project services/SonicRelay.Api/SonicRelay.Api.csproj
 ```
 
-`latest` is only published from `main`.
+The current GitHub Actions workflow does not run this command on the VPS.
 
-If GitHub creates the container package as private after the first publish, open the package settings and change visibility to public.
+## Deployment execution
 
-## Notes
+GitHub Actions copies the two deployment files into the app directory and runs:
 
-- The workflow auto-detects the first non-test `.csproj` if `APP_PROJECT` does not exist.
-- Default project path is `src/SonicRelay.Api/SonicRelay.Api.csproj`.
-- The Dockerfile expects the published DLL to be `SonicRelay.Api.dll`. Adjust the `ENTRYPOINT` if the API project assembly name changes.
-- The first compose file deploys only the API. Add PostgreSQL, Redis and coturn services when the backend implementation lands.
+```bash
+cd /opt/sonicrelay
+chmod +x deploy.sh
+IMAGE=ghcr.io/vitorhugo-java/sonicrelay-api:sha-<commit> ./deploy.sh
+```
+
+The script validates `.env`, Docker and Compose; pulls the API image; runs `docker compose up -d --remove-orphans`; prunes dangling images; and prints service status.
+
+## Verification
+
+On the VPS:
+
+```bash
+docker compose -f /opt/sonicrelay/docker-compose.prod.yml ps
+docker logs --tail 100 sonicrelay-api
+curl --fail http://127.0.0.1:8080/health/live
+curl --fail http://127.0.0.1:8080/health/ready
+```
+
+`/health/live` proves the API process responds. `/health/ready` additionally proves PostgreSQL and Redis are reachable.
+
+From outside the VPS, verify TLS and the reverse proxy:
+
+```bash
+curl --fail https://stream.example.com/health/ready
+```
+
+## Rollback
+
+Redeploy a previous immutable image tag:
+
+```bash
+cd /opt/sonicrelay
+IMAGE=ghcr.io/vitorhugo-java/sonicrelay-api:sha-<previous-commit> ./deploy.sh
+```
+
+Database rollback is separate. Do not downgrade an image across an incompatible schema change without a tested migration rollback or restored backup.
+
+## Full infrastructure stack
+
+The repository also contains a separate full-stack Compose topology:
+
+```bash
+cp infra/.env.prod.example infra/.env.prod
+docker compose \
+  --env-file infra/.env.prod \
+  -f infra/compose.yml \
+  -f infra/compose.prod.yml \
+  --profile prod \
+  up -d
+```
+
+It includes API, PostgreSQL, Redis, coturn and nginx. It is not copied or invoked by the GitHub Actions SSH deployment. Review `infra/nginx/default.conf`, `infra/coturn/turnserver.conf`, exposed ports, DNS and every example secret before production use.
+
+TURN/STUN should use DNS-only records and native ports (`3478/udp`, `3478/tcp`, `5349/tcp`, and the configured UDP relay range), not a normal HTTP proxy.
