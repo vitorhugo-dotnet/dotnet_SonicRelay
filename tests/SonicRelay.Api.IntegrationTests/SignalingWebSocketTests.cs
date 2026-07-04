@@ -103,6 +103,28 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         Assert.NotEqual(DateTimeOffset.UnixEpoch, routed.GetProperty("timestamp").GetDateTimeOffset());
     }
 
+    [Fact]
+    public async Task Signaling_announces_a_new_participant_to_existing_session_peers()
+    {
+        var publisher = await CreateParticipantAsync("join-announcement-publisher");
+        var viewer = await CreateViewerAsync(publisher, "join-announcement-viewer");
+        using var publisherSocket = await ConnectAsync(publisher);
+        await ReceiveAsync(publisherSocket);
+
+        using var viewerSocket = await ConnectAsync(viewer);
+        var viewerJoined = await ReceiveAsync(viewerSocket);
+        Assert.Equal(viewer.ParticipantId, viewerJoined.GetProperty("payload").GetProperty("participantId").GetGuid());
+        Assert.Equal(ParticipantRoles.Viewer, viewerJoined.GetProperty("payload").GetProperty("role").GetString());
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var announced = await ReceiveAsync(publisherSocket, timeout.Token);
+        AssertEnvelope(announced, "session.joined", publisher.SessionId);
+        Assert.Equal(viewer.ParticipantId, announced.GetProperty("from").GetGuid());
+        Assert.Equal(publisher.ParticipantId, announced.GetProperty("to").GetGuid());
+        Assert.Equal(viewer.ParticipantId, announced.GetProperty("payload").GetProperty("participantId").GetGuid());
+        Assert.Equal(ParticipantRoles.Viewer, announced.GetProperty("payload").GetProperty("role").GetString());
+    }
+
     [Theory]
     [InlineData("unsupported.type", "unsupported_message_type")]
     [InlineData("session.ended", "unsupported_message_type")]
@@ -246,6 +268,44 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
             .Where(x => x.Email == email)
             .Select(x => x.Id)
             .SingleAsync();
+    }
+
+    private async Task<TestParticipant> CreateViewerAsync(TestParticipant publisher, string prefix)
+    {
+        var http = _factory.CreateClient();
+        var email = $"ws-{prefix}-{Guid.NewGuid():N}@example.com";
+        var register = await http.PostAsJsonAsync("/auth/register", new { email, password = Password });
+        Assert.Equal(HttpStatusCode.OK, register.StatusCode);
+        var login = await http.PostAsJsonAsync("/auth/login", new { email, password = Password });
+        var tokens = await ReadJsonAsync(login);
+        var accessToken = tokens.GetProperty("accessToken").GetString()!;
+
+        var userId = await GetUserIdAsync(email);
+        var deviceId = Guid.NewGuid();
+        var participantId = Guid.NewGuid();
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.Devices.Add(new Device
+        {
+            Id = deviceId,
+            OwnerUserId = userId,
+            Name = $"{prefix} device",
+            Type = DeviceTypes.FlutterViewer,
+            Platform = DevicePlatforms.Android,
+            CreatedAt = DateTimeOffset.UtcNow
+        });
+        db.SessionParticipants.Add(new SessionParticipant
+        {
+            Id = participantId,
+            SessionId = publisher.SessionId,
+            UserId = userId,
+            DeviceId = deviceId,
+            Role = ParticipantRoles.Viewer,
+            Status = ParticipantStatuses.Connected,
+            JoinedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
+        return new TestParticipant(accessToken, publisher.SessionId, deviceId, participantId);
     }
 
     private async Task<WebSocket> ConnectAsync(TestParticipant participant)

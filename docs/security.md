@@ -21,7 +21,7 @@ This document separates controls present in the current code from work still req
 - WebSocket upgrade requires matching authenticated user, device and session participant records.
 - Signaling routing always uses the authenticated participant as `from` and restricts recipients to the same session.
 
-The named policies `CanRegisterDevice`, `CanCreateSession`, `CanJoinSession`, `CanPublishSession` and `CanViewSession` currently only require authentication; resource-specific checks live in handlers. Device handlers do not yet implement ownership or persistence.
+The named policies `CanRegisterDevice`, `CanCreateSession`, `CanJoinSession`, `CanPublishSession` and `CanViewSession` currently only require authentication; resource-specific ownership, type and revocation checks live in handlers.
 
 ### Session codes
 
@@ -50,7 +50,7 @@ Current limitation: successful join lookup does not consume a code. A code can b
 
 ## Known production gaps
 
-- Device endpoints are stubs, so they do not enforce ownership, validate input or persist/revoke devices.
+- Device ownership and lifecycle are enforced by handlers; policy names alone do not express those resource checks.
 - There is no CORS configuration. Browser-based clients need an explicit allowlist before use.
 - There is no access/refresh-token server-side revocation mechanism.
 - `ApplicationUser.IsDisabled` exists but is not checked by endpoint authorization.

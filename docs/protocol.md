@@ -35,18 +35,18 @@ Login and refresh use fixed-window, IP-keyed rate limits.
 
 ## Devices
 
-All device routes require authentication, but their current handlers are stubs.
+All device routes require authentication and operate only on devices owned by the caller.
 
 | Method | Route | Current behavior |
 | --- | --- | --- |
-| `POST` | `/api/devices/` | Returns `201 Created` without creating a device or response body. |
-| `GET` | `/api/devices/` | Returns `200 OK` without a device collection body. |
-| `GET` | `/api/devices/{deviceId}` | Returns `200` with the route `deviceId`; no lookup or ownership check. |
-| `PATCH` | `/api/devices/{deviceId}` | Returns `200` with the route `deviceId`; no update. |
-| `DELETE` | `/api/devices/{deviceId}` | Returns `204`; no deletion. |
-| `POST` | `/api/devices/{deviceId}/revoke` | Returns `200` with `deviceId` and `revoked: true`; no persistence. |
+| `POST` | `/api/devices/` | Validates type/platform, persists a device and returns `201 Created`. |
+| `GET` | `/api/devices/` | Lists the caller's devices. |
+| `GET` | `/api/devices/{deviceId}` | Returns an owned device or `404`. |
+| `PATCH` | `/api/devices/{deviceId}` | Updates an owned device's name and/or public key. |
+| `DELETE` | `/api/devices/{deviceId}` | Deletes an owned device and returns `204`. |
+| `POST` | `/api/devices/{deviceId}/revoke` | Idempotently revokes an owned device. |
 
-Session routes do perform real device ownership/revocation checks against PostgreSQL. Consequently, the public device lifecycle is not yet usable end to end.
+Valid pairs are `windows_publisher`/`windows` and `flutter_viewer`/`android|ios`. Revoked devices cannot create, join or connect to sessions.
 
 ## Sessions
 
@@ -81,6 +81,41 @@ Session responses contain `id`, `ownerUserId`, `sourceDeviceId`, `status`, `maxV
 
 ## WebSocket signaling
 
+### Mapa mental: signaling não é mídia
+
+- **WebSocket** é o canal persistente de signaling entre cada client e o backend.
+- **WebRTC** cria a conexão de mídia entre Publisher e Viewer, direta ou via relay.
+- **SDP offer/answer** negocia capacidades e parâmetros da conexão.
+- **ICE candidate** descreve um caminho de rede que um peer pode tentar.
+- **STUN** ajuda um peer a descobrir seu endereço público.
+- **TURN/coturn** retransmite os pacotes WebRTC quando a conexão direta falha.
+- **Opus** é o codec de áudio usado pelos clients; não roda no backend.
+
+O backend é o **control-plane**: autentica, autoriza, mantém sessões e encaminha signaling. O áudio pertence ao **media-plane** e flui entre os clients ou através do coturn. A API não captura, codifica, decodifica, armazena nem retransmite áudio.
+
+### Fluxo do Publisher
+
+1. Autentique pela API e registre um device `windows_publisher`/`windows`.
+2. Crie uma sessão com `POST /api/sessions/` e exiba o código temporário ao usuário.
+3. Abra o WebSocket autenticado usando `sessionId` e o ID do device Publisher.
+4. Guarde seu `participantId` recebido em `session.joined`. Quando outro `session.joined` anunciar um Viewer, use o `participantId` do payload como destino de `publisher.ready`.
+5. Para cada Viewer, crie uma `RTCPeerConnection`, adicione a faixa de áudio Opus e envie uma `webrtc.offer` direcionada ao `participantId` dele.
+6. Ao receber `webrtc.answer`, aplique o SDP como remote description na conexão daquele Viewer.
+7. Troque `webrtc.ice_candidate` nos dois sentidos enquanto o ICE gathering estiver ativo. Candidate vazio/nulo para fim de gathering deve ser representado no payload conforme a biblioteca do client, pois o backend não interpreta o campo.
+8. Mantenha uma peer connection por Viewer. Capture áudio e gerencie reconnect/cleanup no app Windows, não nesta API.
+
+### Fluxo do Viewer
+
+1. Autentique pela API, registre um device `flutter_viewer` para `android` ou `ios` e entre com `POST /api/sessions/join`.
+2. Abra o WebSocket autenticado usando os `sessionId` e `deviceId` retornados/registrados.
+3. Guarde seu `participantId` recebido em `session.joined`. Ao receber `publisher.ready`, aprenda o ID do Publisher pelo campo autenticado `from` e responda com `viewer.ready` para esse destino.
+4. Ao receber `webrtc.offer`, crie/configure a `RTCPeerConnection` e aplique o SDP como remote description.
+5. Gere a answer, aplique-a localmente e envie `webrtc.answer` ao Publisher.
+6. Troque `webrtc.ice_candidate` nos dois sentidos e conecte a faixa de áudio remota ao playback Flutter.
+7. Encerre a peer connection ao receber `session.ended`, ao sair da sessão ou ao perder a autorização do device.
+
+### Admissão e envelope
+
 Connect with an authenticated WebSocket upgrade:
 
 ```text
@@ -112,9 +147,22 @@ Validation failures return HTTP `400`, `401`, `403`, `404` or `410` before the u
 }
 ```
 
+Ao admitir um socket, o servidor envia ao novo socket um `session.joined` sobre ele próprio (`from: null`) e anuncia o novo participante aos peers já conectados (`from: <new-participant-uuid>`). O payload sempre contém `participantId` e `role`. Assim, o Publisher descobre cada Viewer sem compartilhar IDs fora do protocolo; o Viewer descobre o Publisher quando recebe `publisher.ready`.
+
 ### Client messages
 
 Clients send the same envelope shape. `type` is required. `messageId` may be supplied as a UUID and is preserved; otherwise the server generates it. Client `sessionId`, `from`, and `timestamp` values are never trusted. The server derives the session from the connection, overwrites `from` with the authenticated participant, and assigns its own timestamp.
+
+Um client precisa enviar apenas `type`, `to`, `payload` e, opcionalmente, `messageId`:
+
+```json
+{
+  "type": "viewer.ready",
+  "messageId": "0f057269-0f91-4a30-a7be-f5755b01f82a",
+  "to": "<publisher-participant-uuid>",
+  "payload": {}
+}
+```
 
 `ping` requires no recipient and produces an enveloped `pong`. These routed types require a UUID `to` participant in the same live session and may include any JSON `payload`:
 
@@ -143,4 +191,91 @@ The server emits a normalized routed frame:
 
 SDP and ICE payloads are opaque JSON to the API. SDP describes the peer media/session parameters, and ICE candidates describe network paths discovered by the peers. The server forwards those payloads unchanged and never writes their content to logs; routing logs contain only message type, session ID, sender ID, recipient ID, and message ID.
 
+### Offer/answer flow
+
+O Publisher inicia a negociação para cada Viewer. Use o SDP produzido pela biblioteca WebRTC sem analisá-lo ou remontá-lo manualmente:
+
+```json
+{
+  "type": "webrtc.offer",
+  "to": "<viewer-participant-uuid>",
+  "payload": { "type": "offer", "sdp": "<sdp-gerado-pelo-webrtc>" }
+}
+```
+
+O Viewer responde ao participante Publisher indicado em `from`:
+
+```json
+{
+  "type": "webrtc.answer",
+  "to": "<publisher-participant-uuid>",
+  "payload": { "type": "answer", "sdp": "<sdp-gerado-pelo-webrtc>" }
+}
+```
+
+O backend preserva `payload`, mas normaliza os metadados do envelope. O recebimento de signaling não significa que a mídia conectou: cada client deve observar os estados ICE/peer connection e tratar timeout ou reconexão.
+
+### ICE candidate flow
+
+Publisher e Viewer enviam candidates conforme a biblioteca WebRTC os descobre (trickle ICE), sempre direcionados ao outro participante:
+
+```json
+{
+  "type": "webrtc.ice_candidate",
+  "to": "<other-participant-uuid>",
+  "payload": {
+    "candidate": "candidate:<dados-omitidos>",
+    "sdpMid": "0",
+    "sdpMLineIndex": 0
+  }
+}
+```
+
+Configure STUN e TURN/coturn nos clients ao criar a peer connection. Essas credenciais não passam pelo payload de signaling e nunca devem ser incorporadas a exemplos, logs ou repositórios públicos.
+
+### O que o backend valida
+
+- token de acesso e upgrade WebSocket;
+- formato UUID de `sessionId` e `deviceId`;
+- existência e estado/validade temporal da sessão;
+- propriedade, tipo esperado e revogação do device;
+- participação do usuário/device na sessão;
+- JSON válido, `type` permitido, limite de 64 KiB e frame textual;
+- presença/formato de `to` e pertencimento do destinatário à mesma sessão;
+- identidade do remetente, derivada do socket autenticado.
+
+### O que o backend não inspeciona
+
+- conteúdo ou validade semântica do SDP;
+- conteúdo, alcançabilidade ou prioridade de ICE candidates;
+- codec, bitrate, samples ou qualquer pacote de áudio;
+- estado interno da peer connection;
+- credenciais/configuração STUN/TURN dos clients.
+
+Esse limite é deliberado: o backend coordena peers e trata `payload` como JSON opaco. Validação WebRTC pertence às bibliotecas dos clients.
+
+### Notas de segurança para clients
+
+- Use apenas HTTPS/WSS em produção e valide o certificado do servidor.
+- Armazene access/refresh tokens no armazenamento seguro da plataforma e nunca em logs.
+- Não registre SDP, ICE candidates, tokens, códigos de sessão nem credenciais TURN; SDP/ICE podem revelar dados de rede e mídia.
+- Aceite mensagens somente pelo socket autenticado e para a sessão/participante esperado, mesmo com a normalização do servidor.
+- Trate `error`, `session.left`, `session.ended`, fechamento do socket e expiração como estados normais e limpe recursos.
+- Não confunda coturn com a API: coturn pode retransmitir pacotes WebRTC cifrados; a API só retransmite signaling JSON.
+
+### Confusões comuns de iniciantes
+
+- WebSocket conectado não significa áudio conectado; ele apenas permite negociar WebRTC.
+- SDP não contém o áudio e ICE candidate não é um pacote de áudio.
+- STUN não retransmite mídia; TURN/coturn é o fallback que pode retransmiti-la.
+- Opus roda nos clients através do stack WebRTC, não no ASP.NET Core.
+- `to` recebe um **participant ID**, não user ID, device ID ou session ID.
+- Uma sessão com vários Viewers exige uma peer connection Publisher↔Viewer para cada Viewer no MVP; não existe SFU.
+
 Text messages may be fragmented but may not exceed 64 KiB. Binary frames are rejected. Disconnects broadcast `session.left` to other live participants. When the session becomes terminal, the server sends `session.ended` and closes routing for that connection. There is no persisted signaling history; `SignalingEvent` is mapped in EF Core but the endpoint does not write it.
+
+## Próximos passos dos clients
+
+Este repositório termina no contrato de signaling. O Windows Publisher deve implementar captura WASAPI, criação das peer connections e publicação Opus em seu próprio repositório. O Flutter Viewer deve implementar recepção WebRTC e playback no repositório mobile. Nenhuma dessas responsabilidades deve ser movida para o backend, e o MVP não requer SFU ou outro media server.
+
+Para uma introdução aos conceitos, leia o [guia para leigos](beginner-guide.md). Para os limites arquiteturais e controles existentes, consulte [Architecture](architecture.md) e [Security](security.md).

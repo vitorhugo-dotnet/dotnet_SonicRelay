@@ -25,7 +25,7 @@ This repository contains only the backend and its infrastructure.
 | WebRTC media | Client responsibility | No media capture, transcoding or relay is implemented in this API. |
 | CI/CD | Implemented with scope noted | GitHub Actions builds/tests/publishes and deploys the API-only Compose stack over SSH. |
 
-See [Protocol](docs/protocol.md) for the exact implemented routes and [Security](docs/security.md) for implemented controls and known gaps.
+See the [client integration protocol](docs/protocol.md) for exact routes and WebRTC signaling flows, the [beginner guide](docs/beginner-guide.md) for a plain-language introduction, and [Security](docs/security.md) for implemented controls and known gaps.
 
 ## Quick start
 
@@ -71,7 +71,8 @@ Validate the real authentication, device, session, and WebSocket signaling flow 
 ## Documentation
 
 - [Architecture](docs/architecture.md)
-- [HTTP and WebSocket protocol](docs/protocol.md)
+- [HTTP, WebSocket and WebRTC client integration protocol](docs/protocol.md)
+- [Guia para leigos: WebSocket, WebRTC, Signaling, Opus e arquitetura](docs/beginner-guide.md)
 - [Security](docs/security.md)
 - [VPS deployment over SSH](docs/deployment-vps-ssh.md)
 - [Architecture decision records](docs/adr/)

@@ -123,7 +123,9 @@ public static class SignalingWebSocketEndpoint
         try
         {
             await SendEnvelopeAsync(SendFrameAsync, "session.joined", sessionId, null, participant.Id,
-                new { participantId = participant.Id, participant.Role }, context.RequestAborted);
+                new { participantId = participant.Id, role = participant.Role }, context.RequestAborted);
+            await BroadcastAsync(registry, sessionId, participant.Id, "session.joined", participant.Id,
+                new { participantId = participant.Id, role = participant.Role }, context.RequestAborted);
             await ReceiveLoopAsync(socket, SendFrameAsync, sessionId, participant.Id, db, registry, logger,
                 context.RequestAborted);
         }

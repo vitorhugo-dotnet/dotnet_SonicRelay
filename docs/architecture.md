@@ -57,7 +57,7 @@ The signaling registry is process-local. Multiple API replicas do not share live
 
 ## Primary flow
 
-The device endpoints shown below are still stubs. Until they persist devices, session creation/join requires a device record provisioned by another mechanism; integration tests insert those records directly.
+Device endpoints persist owner-scoped Windows Publisher and Flutter Viewer records. Session creation and join validate those devices before admitting participants.
 
 ```mermaid
 sequenceDiagram
@@ -71,7 +71,7 @@ sequenceDiagram
 
     W->>API: POST /auth/login
     API-->>W: access token + refresh token
-    Note over W,DB: Device must already exist while device handlers are stubs
+    W->>API: register Windows Publisher device
     W->>API: POST /api/sessions
     API->>DB: create session + publisher participant
     API->>R: store HMAC-derived code lookup with TTL
@@ -80,6 +80,7 @@ sequenceDiagram
 
     F->>API: POST /auth/login
     API-->>F: access token + refresh token
+    F->>API: register Flutter Viewer device
     F->>API: POST /api/sessions/join
     API->>R: resolve code
     API->>DB: create viewer participant
