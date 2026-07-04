@@ -5,7 +5,7 @@ services:
     container_name: sonicrelay-api
     build:
       context: ../
-      dockerfile: services/SonicRelay.Api/Dockerfile
+      dockerfile: Dockerfile
     environment:
       ASPNETCORE_URLS: http://+:8080
       ASPNETCORE_ENVIRONMENT: ${ASPNETCORE_ENVIRONMENT:-Production}

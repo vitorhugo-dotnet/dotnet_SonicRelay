@@ -48,6 +48,8 @@ curl http://localhost:8080/health/ready
 
 Docker development stack:
 
+The root `Dockerfile` is the canonical image definition. Run `docker build .` from the repository root; it publishes `services/SonicRelay.Api/SonicRelay.Api.csproj` using a multi-stage, non-root runtime image. Compose and CI/CD use the same Dockerfile and project path.
+
 ```bash
 cp infra/.env.example infra/.env
 docker compose \

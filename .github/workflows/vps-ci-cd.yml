@@ -18,7 +18,7 @@ env:
   DOTNET_VERSION: 10.0.x
   DOTNET_MAJOR: "10.0"
   CONFIGURATION: Release
-  APP_PROJECT: src/SonicRelay.Api/SonicRelay.Api.csproj
+  APP_PROJECT: services/SonicRelay.Api/SonicRelay.Api.csproj
   IMAGE_NAME: ghcr.io/vitorhugo-java/sonicrelay-api
 
 concurrency:
@@ -43,32 +43,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          configured_project="${APP_PROJECT:-}"
-
-          if [[ -n "$configured_project" && -f "$configured_project" ]]; then
-            echo "has_dotnet_project=true" >> "$GITHUB_OUTPUT"
-            echo "app_project=$configured_project" >> "$GITHUB_OUTPUT"
-            echo "Using configured project: $configured_project"
-            exit 0
-          fi
-
-          mapfile -t projects < <(find . -type f -name '*.csproj' \
-            ! -iname '*test*.csproj' \
-            ! -iname '*tests*.csproj' \
-            ! -path '*/bin/*' \
-            ! -path '*/obj/*' \
-            | sort)
-
-          if (( ${#projects[@]} == 0 )); then
-            echo "::warning::No .NET project found yet. Build/Test/Image/Deploy will be skipped until a .csproj exists."
-            echo "has_dotnet_project=false" >> "$GITHUB_OUTPUT"
-            echo "app_project=" >> "$GITHUB_OUTPUT"
-            exit 0
+          if [[ ! -f "$APP_PROJECT" ]]; then
+            echo "::error file=$APP_PROJECT::Configured API project was not found."
+            exit 1
           fi
 
           echo "has_dotnet_project=true" >> "$GITHUB_OUTPUT"
-          echo "app_project=${projects[0]#./}" >> "$GITHUB_OUTPUT"
-          echo "Using discovered project: ${projects[0]#./}"
+          echo "app_project=$APP_PROJECT" >> "$GITHUB_OUTPUT"
+          echo "Using configured project: $APP_PROJECT"
 
       - name: Setup .NET
         if: steps.resolve.outputs.has_dotnet_project == 'true'

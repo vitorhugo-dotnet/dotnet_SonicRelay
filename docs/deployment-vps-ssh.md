@@ -12,9 +12,9 @@ The automated deployment is intentionally API-only. It copies `deploy/docker-com
 
 `.github/workflows/vps-ci-cd.yml` runs on pull requests, pushes to `main` and its legacy architecture branch, and manual dispatch.
 
-- Build resolves the configured API project; because the configured legacy path currently does not exist, it discovers the first non-test `.csproj` and builds it.
+- Build restores and compiles the configured API project at `services/SonicRelay.Api/SonicRelay.Api.csproj`, failing if that exact path is missing.
 - Test discovers every `*Test.csproj`/`*Tests.csproj`, restores it and uploads TRX results.
-- Non-PR runs build and publish `ghcr.io/vitorhugo-java/sonicrelay-api:sha-<commit>`.
+- Non-PR runs build the canonical root `Dockerfile` and publish `ghcr.io/vitorhugo-java/sonicrelay-api:sha-<commit>`.
 - `main` additionally publishes `:latest`.
 - Pushes to `main`, and manual runs with `deploy=true`, deploy the immutable SHA image to the production environment.
 

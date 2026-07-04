@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1.7
 
 ARG DOTNET_MAJOR=10.0
-ARG APP_PROJECT=src/SonicRelay.Api/SonicRelay.Api.csproj
+ARG APP_PROJECT=services/SonicRelay.Api/SonicRelay.Api.csproj
 
 FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_MAJOR} AS build
 ARG APP_PROJECT
