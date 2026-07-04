@@ -92,6 +92,9 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
 
         var response = await ReceiveAsync(socket);
         Assert.Equal("session.ended", response.GetProperty("type").GetString());
+        var buffer = new byte[64];
+        var close = await socket.ReceiveAsync(buffer, CancellationToken.None);
+        Assert.Equal(WebSocketMessageType.Close, close.MessageType);
     }
 
     private async Task<TestParticipant> CreateParticipantAsync(string prefix)
