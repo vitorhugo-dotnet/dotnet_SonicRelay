@@ -66,6 +66,8 @@ Run the API integration/E2E tests:
 dotnet test tests/SonicRelay.Api.IntegrationTests/SonicRelay.Api.IntegrationTests.csproj
 ```
 
+Validate the real authentication, device, session, and WebSocket signaling flow without audio or WebRTC clients using the [fake signaling client](tools/SonicRelay.SignalingClient/README.md).
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
