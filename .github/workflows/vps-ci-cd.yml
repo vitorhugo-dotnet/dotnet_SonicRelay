@@ -231,15 +231,70 @@ jobs:
             --output deploy/efbundle \
             --force
 
+      - name: Resolve SSH target
+        id: ssh_target
+        shell: bash
+        env:
+          RAW_VPS_HOST: ${{ secrets.VPS_HOST }}
+          RAW_VPS_PORT: ${{ secrets.VPS_PORT }}
+          RAW_VPS_APP_DIR: ${{ secrets.VPS_APP_DIR }}
+        run: |
+          set -euo pipefail
+
+          host="${RAW_VPS_HOST:-}"
+          if [[ -z "$host" ]]; then
+            echo "::error::VPS_HOST secret is required. Use a host name or IP, not a URL."
+            exit 1
+          fi
+
+          host="${host#http://}"
+          host="${host#https://}"
+          host="${host#ssh://}"
+          host="${host#tcp://}"
+          host="${host#*@}"
+          host="${host%%/*}"
+
+          port="${RAW_VPS_PORT:-}"
+          if [[ "$host" =~ ^([^:]+):([0-9]+)$ ]]; then
+            host="${BASH_REMATCH[1]}"
+            if [[ -z "$port" ]]; then
+              port="${BASH_REMATCH[2]}"
+            fi
+          fi
+
+          if [[ -z "$host" ]]; then
+            echo "::error::VPS_HOST resolved to an empty host. Check the VPS_HOST secret."
+            exit 1
+          fi
+
+          if [[ -z "$port" ]]; then
+            port="22"
+          fi
+
+          if [[ ! "$port" =~ ^[0-9]+$ ]]; then
+            echo "::error::VPS_PORT must be numeric."
+            exit 1
+          fi
+
+          app_dir="${RAW_VPS_APP_DIR:-$VPS_APP_DIR_DEFAULT}"
+          if [[ -z "$app_dir" ]]; then
+            echo "::error::VPS app directory resolved to empty."
+            exit 1
+          fi
+
+          echo "host=$host" >> "$GITHUB_OUTPUT"
+          echo "port=$port" >> "$GITHUB_OUTPUT"
+          echo "app_dir=$app_dir" >> "$GITHUB_OUTPUT"
+
       - name: Copy deployment files
         uses: appleboy/scp-action@v1
         with:
-          host: ${{ secrets.VPS_HOST }}
+          host: ${{ steps.ssh_target.outputs.host }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
+          port: ${{ steps.ssh_target.outputs.port }}
           source: "deploy/docker-compose.prod.yml,deploy/deploy.sh,deploy/efbundle"
-          target: ${{ secrets.VPS_APP_DIR || env.VPS_APP_DIR_DEFAULT }}
+          target: ${{ steps.ssh_target.outputs.app_dir }}
           strip_components: 1
           overwrite: true
 
@@ -247,12 +302,12 @@ jobs:
         uses: appleboy/ssh-action@v1
         env:
           IMAGE: ${{ needs.publish_image.outputs.image }}
-          APP_DIR: ${{ secrets.VPS_APP_DIR || env.VPS_APP_DIR_DEFAULT }}
+          APP_DIR: ${{ steps.ssh_target.outputs.app_dir }}
         with:
-          host: ${{ secrets.VPS_HOST }}
+          host: ${{ steps.ssh_target.outputs.host }}
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
-          port: ${{ secrets.VPS_PORT || 22 }}
+          port: ${{ steps.ssh_target.outputs.port }}
           envs: IMAGE,APP_DIR
           script: |
             cd "$APP_DIR"
