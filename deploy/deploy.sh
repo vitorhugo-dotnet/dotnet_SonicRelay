@@ -6,6 +6,8 @@ COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"
 IMAGE="${IMAGE:?IMAGE is required}"
 RUN_MIGRATIONS="${RUN_MIGRATIONS:-true}"
 MIGRATION_BUNDLE="${MIGRATION_BUNDLE:-./efbundle}"
+MIGRATION_NETWORK="${MIGRATION_NETWORK:-infra_network}"
+MIGRATION_RUNNER_IMAGE="${MIGRATION_RUNNER_IMAGE:-mcr.microsoft.com/dotnet/runtime-deps:10.0}"
 
 cd "$APP_DIR"
 
@@ -41,6 +43,12 @@ run_migrations() {
     exit 1
   fi
 
+  if ! docker network inspect "$MIGRATION_NETWORK" >/dev/null 2>&1; then
+    echo "Missing Docker network: $MIGRATION_NETWORK"
+    echo "Create it before deploy or set MIGRATION_NETWORK to the network that can resolve PostgreSQL."
+    exit 1
+  fi
+
   local postgres_connection
   postgres_connection="${POSTGRES_CONNECTION:-$(read_env_value "ConnectionStrings__Postgres")}"
 
@@ -52,8 +60,14 @@ run_migrations() {
   echo "Stopping API before applying EF Core migrations"
   docker compose -f "$COMPOSE_FILE" stop api >/dev/null 2>&1 || true
 
-  echo "Applying EF Core migrations"
-  DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 "$MIGRATION_BUNDLE" --connection "$postgres_connection" --no-color
+  echo "Applying EF Core migrations inside Docker network: $MIGRATION_NETWORK"
+  docker run --rm \
+    --network "$MIGRATION_NETWORK" \
+    --volume "$APP_DIR:/workspace:ro" \
+    --workdir /workspace \
+    --env DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1 \
+    "$MIGRATION_RUNNER_IMAGE" \
+    "$MIGRATION_BUNDLE" --connection "$postgres_connection" --no-color
 }
 
 export IMAGE
