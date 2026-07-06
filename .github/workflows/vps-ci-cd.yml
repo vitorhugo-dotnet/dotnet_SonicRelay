@@ -19,7 +19,9 @@ env:
   DOTNET_MAJOR: "10.0"
   CONFIGURATION: Release
   APP_PROJECT: services/SonicRelay.Api/SonicRelay.Api.csproj
+  MIGRATIONS_PROJECT: src/SonicRelay.Infrastructure/SonicRelay.Infrastructure.csproj
   IMAGE_NAME: ghcr.io/vitorhugo-java/sonicrelay-api
+  VPS_APP_DIR_DEFAULT: /docker/sonicRelay
 
 concurrency:
   group: sonicrelay-${{ github.workflow }}-${{ github.ref }}
@@ -195,6 +197,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Install EF Core CLI
+        shell: bash
+        run: |
+          set -euo pipefail
+          dotnet tool install --global dotnet-ef --version 10.0.0
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Build EF Core migration bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p deploy
+          dotnet ef migrations bundle \
+            --configuration "${{ env.CONFIGURATION }}" \
+            --project "${{ env.MIGRATIONS_PROJECT }}" \
+            --startup-project "${{ env.APP_PROJECT }}" \
+            --self-contained \
+            --runtime linux-x64 \
+            --output deploy/efbundle \
+            --force
+
       - name: Copy deployment files
         uses: appleboy/scp-action@v1
         with:
@@ -202,15 +230,16 @@ jobs:
           username: ${{ secrets.VPS_USER }}
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_PORT || 22 }}
-          source: "deploy/docker-compose.prod.yml,deploy/deploy.sh"
-          target: ${{ secrets.VPS_APP_DIR || '/opt/sonicrelay' }}
+          source: "deploy/docker-compose.prod.yml,deploy/deploy.sh,deploy/efbundle"
+          target: ${{ secrets.VPS_APP_DIR || env.VPS_APP_DIR_DEFAULT }}
           strip_components: 1
+          overwrite: true
 
       - name: Run deployment
         uses: appleboy/ssh-action@v1
         env:
           IMAGE: ${{ needs.publish_image.outputs.image }}
-          APP_DIR: ${{ secrets.VPS_APP_DIR || '/opt/sonicrelay' }}
+          APP_DIR: ${{ secrets.VPS_APP_DIR || env.VPS_APP_DIR_DEFAULT }}
         with:
           host: ${{ secrets.VPS_HOST }}
           username: ${{ secrets.VPS_USER }}
@@ -219,5 +248,5 @@ jobs:
           envs: IMAGE,APP_DIR
           script: |
             cd "$APP_DIR"
-            chmod +x deploy.sh
+            chmod +x deploy.sh efbundle
             ./deploy.sh
