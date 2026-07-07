@@ -1,3 +1,14 @@
+# Coturn is configured entirely through the command-line args below; no
+# turnserver.conf is mounted (the "Cannot find config file" warning at startup
+# is expected and harmless).
+#
+# The same .env used by docker-compose.prod.yml must define, in addition to
+# the TURN_* variables consumed here, the ICE configuration the API serves to
+# clients at GET /api/webrtc/ice-servers:
+#   TURN_STATIC_AUTH_SECRET=<shared secret, also used by the API for HMAC credentials>
+#   TURN_URIS=turn:<public-host>:3478?transport=udp,turn:<public-host>:3478?transport=tcp,turns:<public-host>:5349?transport=tcp
+#   TURN_CREDENTIAL_TTL_SECONDS=3600   # optional, defaults to 3600
+#   STUN_URIS=stun:<public-host>:3478  # optional, defaults to Google STUN
 services:
   coturn:
     image: coturn/coturn:${COTURN_VERSION:-latest}

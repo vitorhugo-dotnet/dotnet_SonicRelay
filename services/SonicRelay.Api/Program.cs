@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.BearerToken;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using SonicRelay.Api.Endpoints;
 using SonicRelay.Api.Services;
 using SonicRelay.Infrastructure;
@@ -13,6 +14,28 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 builder.Services.AddSonicRelayInfrastructure(builder.Configuration);
+builder.Services.TryAddSingleton(TimeProvider.System);
+builder.Services.AddSingleton<TurnCredentialService>();
+builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
+// The deploy .env feeds coturn with flat variable names; accept those as a
+// fallback so one .env configures both containers without duplication.
+builder.Services.PostConfigure<TurnOptions>(options =>
+{
+    var configuration = builder.Configuration;
+    options.StaticAuthSecret ??= configuration["TURN_STATIC_AUTH_SECRET"];
+    if (options.TurnUris.Length == 0 && configuration["TURN_URIS"] is { Length: > 0 } turnUris)
+    {
+        options.TurnUris = turnUris.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+    if (configuration["STUN_URIS"] is { Length: > 0 } stunUris)
+    {
+        options.StunUris = stunUris.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+    if (configuration.GetValue<int?>("TURN_CREDENTIAL_TTL_SECONDS") is { } ttl && ttl > 0)
+    {
+        options.CredentialTtlSeconds = ttl;
+    }
+});
 builder.Services.AddSingleton<SessionCleanupService>();
 builder.Services.AddSingleton<IHostedService>(services => services.GetRequiredService<SessionCleanupService>());
 builder.Services.AddRateLimiter(options =>
@@ -76,6 +99,7 @@ app.MapHealthChecks("/health/ready");
 app.MapAuthEndpoints();
 app.MapDeviceEndpoints();
 app.MapSessionEndpoints();
+app.MapWebRtcEndpoints();
 app.MapSignalingWebSocketEndpoint();
 
 app.Run();
