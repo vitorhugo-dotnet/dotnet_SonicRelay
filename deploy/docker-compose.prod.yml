@@ -10,34 +10,6 @@ services:
     networks:
       - infra_network
 
-  coturn:
-    image: coturn/coturn:${COTURN_VERSION:-latest}
-    container_name: sonicrelay-coturn
-    restart: unless-stopped
-    command:
-      - --listening-port=3478
-      - --tls-listening-port=5349
-      - --realm=${TURN_REALM:?TURN_REALM is required}
-      - --server-name=${TURN_REALM:?TURN_REALM is required}
-      - --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP is required}
-      - --min-port=${TURN_MIN_PORT:-49160}
-      - --max-port=${TURN_MAX_PORT:-49200}
-      - --fingerprint
-      - --lt-cred-mech
-      - --use-auth-secret
-      - --static-auth-secret=${TURN_STATIC_AUTH_SECRET:?TURN_STATIC_AUTH_SECRET is required}
-      - --no-loopback-peers
-      - --no-multicast-peers
-      - --log-file=stdout
-      - --simple-log
-    ports:
-      - "${TURN_PORT:-3478}:3478/udp"
-      - "${TURN_PORT:-3478}:3478/tcp"
-      - "${TURNS_PORT:-5349}:5349/tcp"
-      - "${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}:${TURN_MIN_PORT:-49160}-${TURN_MAX_PORT:-49200}/udp"
-    networks:
-      - infra_network
-
 networks:
   infra_network:
     external: true
