@@ -20,7 +20,7 @@ env:
   CONFIGURATION: Release
   APP_PROJECT: services/SonicRelay.Api/SonicRelay.Api.csproj
   MIGRATIONS_PROJECT: src/SonicRelay.Infrastructure/SonicRelay.Infrastructure.csproj
-  IMAGE_NAME: ghcr.io/vitorhugo-java/sonicrelay-api
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/sonicrelay-api
   VPS_APP_DIR_DEFAULT: /docker/sonicRelay
 
 concurrency:
