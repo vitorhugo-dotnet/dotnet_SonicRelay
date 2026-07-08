@@ -23,46 +23,74 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
-    public async Task Ice_servers_returns_stun_only_when_turn_is_not_configured()
+    public async Task Ice_servers_returns_no_servers_when_turn_is_not_configured_and_fallback_disabled()
     {
-        var (client, _) = await CreateUserAsync("ice-stun", _factory);
+        var (client, _) = await CreateUserAsync("ice-none", _factory);
 
         var body = await GetIceServersAsync(client);
 
-        var servers = body.GetProperty("iceServers").EnumerateArray().ToList();
-        var entry = Assert.Single(servers);
-        Assert.Equal("stun:stun.l.google.com:19302", entry.GetProperty("urls")[0].GetString());
-        Assert.False(TryGetNonNull(entry, "username", out _));
-        Assert.False(TryGetNonNull(entry, "credential", out _));
+        Assert.Empty(body.GetProperty("iceServers").EnumerateArray());
+        Assert.Equal("all", body.GetProperty("iceTransportPolicy").GetString());
+        Assert.True(body.TryGetProperty("expiresAt", out _));
     }
 
     [Fact]
-    public async Task Ice_servers_returns_turn_entry_with_coturn_rest_credentials()
+    public async Task Ice_servers_falls_back_to_google_stun_only_when_explicitly_enabled()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Turn:EnableGoogleStunFallback"] = "true"
+        });
+        var (client, _) = await CreateUserAsync("ice-fallback", factory);
+
+        var body = await GetIceServersAsync(client);
+
+        var entry = Assert.Single(body.GetProperty("iceServers").EnumerateArray());
+        Assert.Equal("stun:stun1.google.com:19302", entry.GetProperty("urls")[0].GetString());
+    }
+
+    [Fact]
+    public async Task Ice_servers_returns_stun_and_turn_entries_with_coturn_rest_credentials()
     {
         const string secret = "integration-turn-secret";
         await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
         {
-            ["Turn:StaticAuthSecret"] = secret,
-            ["Turn:TurnUris:0"] = "turn:relay.example.com:3478?transport=udp",
-            ["Turn:TurnUris:1"] = "turns:relay.example.com:5349?transport=tcp",
-            ["Turn:CredentialTtlSeconds"] = "600"
+            ["Turn:Host"] = "sonicrelay-turn.hugodotnet.dev",
+            ["Turn:Realm"] = "sonicrelay-turn.hugodotnet.dev",
+            ["Turn:Secret"] = secret,
+            ["Turn:TtlSeconds"] = "600"
         });
         var (client, userId) = await CreateUserAsync("ice-turn", factory);
         var before = DateTimeOffset.UtcNow;
 
         var body = await GetIceServersAsync(client);
 
-        Assert.Equal(600, body.GetProperty("ttlSeconds").GetInt32());
+        Assert.Equal("all", body.GetProperty("iceTransportPolicy").GetString());
+        var expiresAt = body.GetProperty("expiresAt").GetDateTimeOffset();
+        Assert.InRange(expiresAt, before.AddSeconds(600).AddSeconds(-30), before.AddSeconds(600).AddSeconds(30));
+
         var servers = body.GetProperty("iceServers").EnumerateArray().ToList();
         Assert.Equal(2, servers.Count);
+
+        var stun = servers.Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("stun:", StringComparison.Ordinal));
+        Assert.Equal("stun:sonicrelay-turn.hugodotnet.dev:3478", stun.GetProperty("urls")[0].GetString());
+        Assert.False(TryGetNonNull(stun, "username", out _));
+        Assert.False(TryGetNonNull(stun, "credential", out _));
+
         var turn = servers.Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal));
-        Assert.Equal("turns:relay.example.com:5349?transport=tcp", turn.GetProperty("urls")[1].GetString());
+        var turnUrls = turn.GetProperty("urls").EnumerateArray().Select(u => u.GetString()).ToList();
+        Assert.Equal(
+        [
+            "turn:sonicrelay-turn.hugodotnet.dev:3478?transport=udp",
+            "turn:sonicrelay-turn.hugodotnet.dev:3478?transport=tcp",
+            "turns:sonicrelay-turn.hugodotnet.dev:5349?transport=tcp"
+        ], turnUrls);
 
         var username = turn.GetProperty("username").GetString()!;
         var parts = username.Split(':', 2);
         var expiry = DateTimeOffset.FromUnixTimeSeconds(long.Parse(parts[0]));
         Assert.Equal(userId.ToString("D"), parts[1]);
-        Assert.InRange(expiry, before.AddSeconds(600).AddSeconds(-30), before.AddSeconds(600).AddSeconds(30));
+        Assert.Equal(expiresAt.ToUnixTimeSeconds(), expiry.ToUnixTimeSeconds());
 
         var expected = Convert.ToBase64String(HMACSHA1.HashData(
             Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(username)));
@@ -74,20 +102,36 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
     {
         await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
         {
-            ["TURN_STATIC_AUTH_SECRET"] = "flat-env-secret",
-            ["TURN_URIS"] = "turn:relay.example.com:3478?transport=udp, turn:relay.example.com:3478?transport=tcp",
-            ["TURN_CREDENTIAL_TTL_SECONDS"] = "1200"
+            ["WEBRTC_TURN_HOST"] = "sonicrelay-turn.hugodotnet.dev",
+            ["WEBRTC_TURN_REALM"] = "sonicrelay-turn.hugodotnet.dev",
+            ["WEBRTC_TURN_SECRET"] = "flat-env-secret",
+            ["WEBRTC_TURN_TTL_SECONDS"] = "1200"
         });
         var (client, _) = await CreateUserAsync("ice-env", factory);
 
         var body = await GetIceServersAsync(client);
 
-        Assert.Equal(1200, body.GetProperty("ttlSeconds").GetInt32());
         var turn = body.GetProperty("iceServers").EnumerateArray()
             .Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal));
-        Assert.Equal(2, turn.GetProperty("urls").GetArrayLength());
-        Assert.Equal("turn:relay.example.com:3478?transport=tcp", turn.GetProperty("urls")[1].GetString());
+        Assert.Equal(3, turn.GetProperty("urls").GetArrayLength());
         Assert.True(TryGetNonNull(turn, "credential", out _));
+    }
+
+    [Fact]
+    public async Task Ice_servers_response_never_exposes_the_static_secret()
+    {
+        const string secret = "must-not-leak-secret";
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Turn:Host"] = "sonicrelay-turn.hugodotnet.dev",
+            ["Turn:Secret"] = secret
+        });
+        var (client, _) = await CreateUserAsync("ice-secret", factory);
+
+        var response = await client.GetAsync("/api/webrtc/ice-servers");
+        var raw = await response.Content.ReadAsStringAsync();
+
+        Assert.DoesNotContain(secret, raw, StringComparison.Ordinal);
     }
 
     private static async Task<JsonElement> GetIceServersAsync(HttpClient client)

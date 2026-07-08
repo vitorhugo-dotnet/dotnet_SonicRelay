@@ -17,23 +17,23 @@ builder.Services.AddSonicRelayInfrastructure(builder.Configuration);
 builder.Services.TryAddSingleton(TimeProvider.System);
 builder.Services.AddSingleton<TurnCredentialService>();
 builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
-// The deploy .env feeds coturn with flat variable names; accept those as a
-// fallback so one .env configures both containers without duplication.
+// The deploy .env feeds both the API and the coturn container from the same
+// flat WEBRTC_TURN_* variables; accept those as a fallback so one .env
+// configures both without duplication. The secret is never logged or
+// echoed back by any endpoint.
 builder.Services.PostConfigure<TurnOptions>(options =>
 {
     var configuration = builder.Configuration;
-    options.StaticAuthSecret ??= configuration["TURN_STATIC_AUTH_SECRET"];
-    if (options.TurnUris.Length == 0 && configuration["TURN_URIS"] is { Length: > 0 } turnUris)
+    options.Host ??= configuration["WEBRTC_TURN_HOST"];
+    options.Realm ??= configuration["WEBRTC_TURN_REALM"];
+    options.Secret ??= configuration["WEBRTC_TURN_SECRET"];
+    if (configuration.GetValue<int?>("WEBRTC_TURN_TTL_SECONDS") is { } ttl && ttl > 0)
     {
-        options.TurnUris = turnUris.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        options.TtlSeconds = ttl;
     }
-    if (configuration["STUN_URIS"] is { Length: > 0 } stunUris)
+    if (configuration.GetValue<bool?>("WEBRTC_ENABLE_GOOGLE_STUN_FALLBACK") is { } fallback)
     {
-        options.StunUris = stunUris.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-    }
-    if (configuration.GetValue<int?>("TURN_CREDENTIAL_TTL_SECONDS") is { } ttl && ttl > 0)
-    {
-        options.CredentialTtlSeconds = ttl;
+        options.EnableGoogleStunFallback = fallback;
     }
 });
 builder.Services.AddSingleton<SessionCleanupService>();

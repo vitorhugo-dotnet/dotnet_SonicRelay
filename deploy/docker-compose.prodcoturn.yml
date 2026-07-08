@@ -4,11 +4,17 @@
 #
 # The same .env used by docker-compose.prod.yml must define, in addition to
 # the TURN_* variables consumed here, the ICE configuration the API serves to
-# clients at GET /api/webrtc/ice-servers:
-#   TURN_STATIC_AUTH_SECRET=<shared secret, also used by the API for HMAC credentials>
-#   TURN_URIS=turn:<public-host>:3478?transport=udp,turn:<public-host>:3478?transport=tcp,turns:<public-host>:5349?transport=tcp
-#   TURN_CREDENTIAL_TTL_SECONDS=3600   # optional, defaults to 3600
-#   STUN_URIS=stun:<public-host>:3478  # optional, defaults to Google STUN
+# clients at GET /api/webrtc/ice-servers. Both the API and coturn read the
+# same WEBRTC_TURN_* variables so one .env configures both containers:
+#   WEBRTC_TURN_HOST=sonicrelay-turn.hugodotnet.dev
+#   WEBRTC_TURN_REALM=sonicrelay-turn.hugodotnet.dev
+#   WEBRTC_TURN_SECRET=<shared secret, also used by the API for HMAC credentials>
+#   WEBRTC_TURN_TTL_SECONDS=3600            # optional, defaults to 3600
+#   WEBRTC_ENABLE_GOOGLE_STUN_FALLBACK=false # keep false in production
+#
+# WEBRTC_TURN_HOST's DNS record must be DNS-only (grey cloud), not proxied
+# through Cloudflare or any other HTTP(S) proxy -- TURN/STUN need direct
+# UDP/TCP reachability on the ports below.
 services:
   coturn:
     image: coturn/coturn:${COTURN_VERSION:-latest}
@@ -17,15 +23,15 @@ services:
     command:
       - --listening-port=3478
       - --tls-listening-port=5349
-      - --realm=${TURN_REALM:?TURN_REALM is required}
-      - --server-name=${TURN_REALM:?TURN_REALM is required}
+      - --realm=${WEBRTC_TURN_REALM:?WEBRTC_TURN_REALM is required}
+      - --server-name=${WEBRTC_TURN_REALM:?WEBRTC_TURN_REALM is required}
       - --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP is required}
       - --min-port=${TURN_MIN_PORT:-49160}
       - --max-port=${TURN_MAX_PORT:-49200}
       - --fingerprint
       - --lt-cred-mech
       - --use-auth-secret
-      - --static-auth-secret=${TURN_STATIC_AUTH_SECRET:?TURN_STATIC_AUTH_SECRET is required}
+      - --static-auth-secret=${WEBRTC_TURN_SECRET:?WEBRTC_TURN_SECRET is required}
       - --no-multicast-peers
       - --log-file=stdout
       - --simple-log

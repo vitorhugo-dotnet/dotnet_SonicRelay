@@ -16,6 +16,11 @@ services:
       Sessions__CodeTtlMinutes: ${SESSION_CODE_TTL_MINUTES:-10}
       Sessions__CodeHmacKey: ${SESSION_CODE_HMAC_KEY:-change-this-session-code-hmac-key}
       Sessions__MaxViewersPerSession: ${SESSION_MAX_VIEWERS:-3}
+      WEBRTC_TURN_HOST: ${WEBRTC_TURN_HOST:-}
+      WEBRTC_TURN_REALM: ${WEBRTC_TURN_REALM:-}
+      WEBRTC_TURN_SECRET: ${WEBRTC_TURN_SECRET:-}
+      WEBRTC_TURN_TTL_SECONDS: ${WEBRTC_TURN_TTL_SECONDS:-3600}
+      WEBRTC_ENABLE_GOOGLE_STUN_FALLBACK: ${WEBRTC_ENABLE_GOOGLE_STUN_FALLBACK:-false}
     depends_on:
       postgres:
         condition: service_healthy

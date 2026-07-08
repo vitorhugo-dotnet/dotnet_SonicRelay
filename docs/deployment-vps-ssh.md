@@ -140,3 +140,23 @@ docker compose \
 It includes API, PostgreSQL, Redis, coturn and nginx. It is not copied or invoked by the GitHub Actions SSH deployment. Review `infra/nginx/default.conf`, `infra/coturn/turnserver.conf`, exposed ports, DNS and every example secret before production use.
 
 TURN/STUN should use DNS-only records and native ports (`3478/udp`, `3478/tcp`, `5349/tcp`, and the configured UDP relay range), not a normal HTTP proxy.
+
+### DNS: API/WSS vs TURN/STUN
+
+The API/WSS hostname (e.g. `sonicrelay-api.hugodotnet.dev`) and the TURN/STUN hostname (e.g. `sonicrelay-turn.hugodotnet.dev`) are separate DNS records with different proxy settings:
+
+- **API/WSS domain** — Cloudflare proxied (orange cloud). HTTP/WSS traffic goes through Cloudflare's edge as usual.
+- **TURN/STUN domain** — DNS-only (grey cloud). Cloudflare cannot proxy raw UDP/TCP TURN traffic; a proxied record would break NAT traversal entirely. Point it directly at the coturn host's IP.
+
+Required inbound ports on the TURN/STUN host:
+
+| Port | Protocol | Purpose |
+| --- | --- | --- |
+| 3478 | UDP | STUN / TURN |
+| 3478 | TCP | TURN (TCP fallback) |
+| 5349 | TCP | TURN over TLS (`turns:`) |
+| 49160-49200 | UDP | TURN relay media range |
+
+Set `WEBRTC_TURN_HOST`, `WEBRTC_TURN_REALM` and `WEBRTC_TURN_SECRET` in `.env` to match the coturn deployment (see `deploy/docker-compose.prodcoturn.yml`); the API derives the STUN/TURN URLs it hands to clients from `WEBRTC_TURN_HOST` and never returns `WEBRTC_TURN_SECRET` itself. Keep `WEBRTC_ENABLE_GOOGLE_STUN_FALLBACK=false` in production — Google's public STUN server is a development-only fallback for when no TURN host is configured, not a fallback the clients or API should depend on once coturn is live.
+
+To debug NAT traversal, clients support a "force relay" mode that restricts ICE to relay candidates only (`iceTransportPolicy: "relay"`), which exercises the coturn relay path end-to-end at the cost of extra latency and VPS bandwidth. Leave it off (`"all"`) by default.

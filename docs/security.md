@@ -46,7 +46,8 @@ Current limitation: successful join lookup does not consume a code. A code can b
 - Set a high-entropy `Sessions__CodeHmacKey`; the Compose development fallback is not production-safe.
 - Keep PostgreSQL, Redis, TURN and SSH credentials outside Git. The CI deploy script expects runtime secrets in `/opt/sonicrelay/.env` (or the configured app directory).
 - The automated Compose file binds the API to `127.0.0.1:8080` by default; terminate TLS at a reverse proxy.
-- TURN/STUN must use its native ports and should not be placed behind a normal HTTP reverse proxy.
+- TURN/STUN must use its native ports and should not be placed behind a normal HTTP reverse proxy. The TURN/STUN hostname's DNS record must be DNS-only (grey cloud), not Cloudflare-proxied; the API/WSS hostname stays Cloudflare-proxied (orange cloud) and can differ from the TURN hostname.
+- `WEBRTC_TURN_SECRET` (coturn's `static-auth-secret`) must never be embedded in client apps, logged, or returned by any API response. Clients only ever receive short-lived TURN credentials from `GET /api/webrtc/ice-servers`.
 
 ## Known production gaps
 
@@ -56,7 +57,6 @@ Current limitation: successful join lookup does not consume a code. A code can b
 - `ApplicationUser.IsDisabled` exists but is not checked by endpoint authorization.
 - Email confirmation is disabled even though the production environment example suggests it should be required; `AUTH_REQUIRE_CONFIRMED_EMAIL` is not read by the application.
 - The live signaling registry is in memory, preventing safe multi-replica routing without sticky sessions or a backplane.
-- TURN uses static configuration; temporary per-session TURN credentials are not issued by the API.
 - The API-only CI deployment does not provision PostgreSQL, Redis, coturn, TLS or backups.
 - No explicit request-body limit is documented for HTTP endpoints beyond server defaults.
 
