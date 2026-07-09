@@ -90,6 +90,49 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.True(TryGetNonNull(turn, "credential", out _));
     }
 
+    [Fact]
+    public async Task Ice_servers_derives_turn_and_stun_uris_from_the_public_host()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["TURN_STATIC_AUTH_SECRET"] = "derived-host-secret",
+            ["TURN_PUBLIC_HOST"] = "turn.example.com"
+        });
+        var (client, _) = await CreateUserAsync("ice-host", factory);
+
+        var body = await GetIceServersAsync(client);
+
+        var servers = body.GetProperty("iceServers").EnumerateArray().ToList();
+        Assert.Equal(2, servers.Count);
+        Assert.Equal("stun:turn.example.com:3478", servers[0].GetProperty("urls")[0].GetString());
+        var turn = servers[1];
+        Assert.Equal("turn:turn.example.com:3478?transport=udp", turn.GetProperty("urls")[0].GetString());
+        Assert.Equal("turn:turn.example.com:3478?transport=tcp", turn.GetProperty("urls")[1].GetString());
+        Assert.True(TryGetNonNull(turn, "username", out _));
+        Assert.True(TryGetNonNull(turn, "credential", out _));
+    }
+
+    [Fact]
+    public async Task Ice_servers_prefers_explicit_turn_uris_over_the_derived_ones()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["TURN_STATIC_AUTH_SECRET"] = "explicit-over-derived",
+            ["TURN_PUBLIC_HOST"] = "turn.example.com",
+            ["TURN_URIS"] = "turns:turn.example.com:5349?transport=tcp",
+            ["STUN_URIS"] = "stun:stun.example.com:3478"
+        });
+        var (client, _) = await CreateUserAsync("ice-explicit", factory);
+
+        var body = await GetIceServersAsync(client);
+
+        var servers = body.GetProperty("iceServers").EnumerateArray().ToList();
+        Assert.Equal("stun:stun.example.com:3478", servers[0].GetProperty("urls")[0].GetString());
+        var turn = servers[1];
+        Assert.Equal(1, turn.GetProperty("urls").GetArrayLength());
+        Assert.Equal("turns:turn.example.com:5349?transport=tcp", turn.GetProperty("urls")[0].GetString());
+    }
+
     private static async Task<JsonElement> GetIceServersAsync(HttpClient client)
     {
         var response = await client.GetAsync("/api/webrtc/ice-servers");

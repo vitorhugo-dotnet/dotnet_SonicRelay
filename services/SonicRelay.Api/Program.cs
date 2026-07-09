@@ -27,9 +27,29 @@ builder.Services.PostConfigure<TurnOptions>(options =>
     {
         options.TurnUris = turnUris.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
+    // The deploy .env template only names the relay's public host; derive the
+    // standard turn: URIs (and a matching stun:) from it so TURN works without
+    // hand-writing TURN_URIS. A turns:5349 entry is intentionally not derived —
+    // it requires a TLS certificate mounted into coturn, so it stays opt-in via
+    // an explicit TURN_URIS.
+    var turnPublicHost = configuration["TURN_PUBLIC_HOST"];
+    if (options.TurnUris.Length == 0 && !string.IsNullOrWhiteSpace(turnPublicHost))
+    {
+        options.TurnUris =
+        [
+            $"turn:{turnPublicHost}:3478?transport=udp",
+            $"turn:{turnPublicHost}:3478?transport=tcp"
+        ];
+    }
     if (configuration["STUN_URIS"] is { Length: > 0 } stunUris)
     {
         options.StunUris = stunUris.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+    else if (!string.IsNullOrWhiteSpace(turnPublicHost))
+    {
+        // Prefer our own coturn for STUN over the Google default when a relay
+        // host is configured.
+        options.StunUris = [$"stun:{turnPublicHost}:3478"];
     }
     if (configuration.GetValue<int?>("TURN_CREDENTIAL_TTL_SECONDS") is { } ttl && ttl > 0)
     {
