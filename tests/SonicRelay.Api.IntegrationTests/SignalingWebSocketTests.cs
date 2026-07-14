@@ -125,6 +125,78 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         Assert.Equal(ParticipantRoles.Viewer, announced.GetProperty("payload").GetProperty("role").GetString());
     }
 
+    [Fact]
+    public async Task Signaling_reconnecting_within_the_grace_period_reports_reconnection_not_departure()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Sessions:ParticipantDisconnectGraceSeconds"] = "10"
+        });
+        var publisher = await CreateParticipantAsync("grace-reconnect-publisher", factory);
+        var viewer = await CreateViewerAsync(publisher, "grace-reconnect-viewer", factory);
+        using var publisherSocket = await ConnectAsync(publisher, factory);
+        await ReceiveAsync(publisherSocket);
+
+        var viewerSocket = await ConnectAsync(viewer, factory);
+        await ReceiveAsync(viewerSocket);
+        var joinAnnouncement = await ReceiveAsync(publisherSocket);
+        Assert.Equal("session.joined", joinAnnouncement.GetProperty("type").GetString());
+
+        viewerSocket.Dispose();
+
+        using var disconnectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var disconnected = await ReceiveAsync(publisherSocket, disconnectTimeout.Token);
+        AssertEnvelope(disconnected, "participant.disconnected", publisher.SessionId);
+        Assert.Equal(viewer.ParticipantId, disconnected.GetProperty("payload").GetProperty("participantId").GetGuid());
+
+        using var reconnectedViewerSocket = await ConnectAsync(viewer, factory);
+        await ReceiveAsync(reconnectedViewerSocket);
+
+        using var reconnectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var reconnected = await ReceiveAsync(publisherSocket, reconnectTimeout.Token);
+        AssertEnvelope(reconnected, "participant.reconnected", publisher.SessionId);
+        Assert.Equal(viewer.ParticipantId, reconnected.GetProperty("payload").GetProperty("participantId").GetGuid());
+
+        await using var assertScope = factory.Services.CreateAsyncScope();
+        var db = assertScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var participantRow = await db.SessionParticipants.SingleAsync(x => x.Id == viewer.ParticipantId);
+        Assert.Equal(ParticipantStatuses.Connected, participantRow.Status);
+    }
+
+    [Fact]
+    public async Task Signaling_finalizes_as_left_after_the_grace_period_elapses_without_reconnecting()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Sessions:ParticipantDisconnectGraceSeconds"] = "1"
+        });
+        var publisher = await CreateParticipantAsync("grace-expiry-publisher", factory);
+        var viewer = await CreateViewerAsync(publisher, "grace-expiry-viewer", factory);
+        using var publisherSocket = await ConnectAsync(publisher, factory);
+        await ReceiveAsync(publisherSocket);
+
+        var viewerSocket = await ConnectAsync(viewer, factory);
+        await ReceiveAsync(viewerSocket);
+        await ReceiveAsync(publisherSocket); // session.joined announcement
+
+        viewerSocket.Dispose();
+
+        using var disconnectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var disconnected = await ReceiveAsync(publisherSocket, disconnectTimeout.Token);
+        AssertEnvelope(disconnected, "participant.disconnected", publisher.SessionId);
+
+        using var leftTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var left = await ReceiveAsync(publisherSocket, leftTimeout.Token);
+        AssertEnvelope(left, "session.left", publisher.SessionId);
+        Assert.Equal(viewer.ParticipantId, left.GetProperty("payload").GetProperty("participantId").GetGuid());
+
+        await using var assertScope = factory.Services.CreateAsyncScope();
+        var db = assertScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var participantRow = await db.SessionParticipants.SingleAsync(x => x.Id == viewer.ParticipantId);
+        Assert.Equal(ParticipantStatuses.Disconnected, participantRow.Status);
+        Assert.NotNull(participantRow.LeftAt);
+    }
+
     [Theory]
     [InlineData("unsupported.type", "unsupported_message_type")]
     [InlineData("session.ended", "unsupported_message_type")]
@@ -212,9 +284,10 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         Assert.Contains("403", exception.Message);
     }
 
-    private async Task<TestParticipant> CreateParticipantAsync(string prefix)
+    private async Task<TestParticipant> CreateParticipantAsync(string prefix, SonicRelayApiFactory? factory = null)
     {
-        var http = _factory.CreateClient();
+        factory ??= _factory;
+        var http = factory.CreateClient();
         var email = $"ws-{prefix}-{Guid.NewGuid():N}@example.com";
         var register = await http.PostAsJsonAsync("/auth/register", new { email, password = Password });
         Assert.Equal(HttpStatusCode.OK, register.StatusCode);
@@ -222,11 +295,11 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         var tokens = await ReadJsonAsync(login);
         var accessToken = tokens.GetProperty("accessToken").GetString()!;
 
-        var userId = await GetUserIdAsync(email);
+        var userId = await GetUserIdAsync(email, factory);
         var deviceId = Guid.NewGuid();
         var sessionId = Guid.NewGuid();
         var participantId = Guid.NewGuid();
-        await using var scope = _factory.Services.CreateAsyncScope();
+        await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         db.Devices.Add(new Device
         {
@@ -261,18 +334,21 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         return new TestParticipant(accessToken, sessionId, deviceId, participantId);
     }
 
-    private async Task<Guid> GetUserIdAsync(string email)
+    private async Task<Guid> GetUserIdAsync(string email, SonicRelayApiFactory? factory = null)
     {
-        await using var scope = _factory.Services.CreateAsyncScope();
+        factory ??= _factory;
+        await using var scope = factory.Services.CreateAsyncScope();
         return await scope.ServiceProvider.GetRequiredService<AppDbContext>().Users
             .Where(x => x.Email == email)
             .Select(x => x.Id)
             .SingleAsync();
     }
 
-    private async Task<TestParticipant> CreateViewerAsync(TestParticipant publisher, string prefix)
+    private async Task<TestParticipant> CreateViewerAsync(TestParticipant publisher, string prefix,
+        SonicRelayApiFactory? factory = null)
     {
-        var http = _factory.CreateClient();
+        factory ??= _factory;
+        var http = factory.CreateClient();
         var email = $"ws-{prefix}-{Guid.NewGuid():N}@example.com";
         var register = await http.PostAsJsonAsync("/auth/register", new { email, password = Password });
         Assert.Equal(HttpStatusCode.OK, register.StatusCode);
@@ -280,10 +356,10 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         var tokens = await ReadJsonAsync(login);
         var accessToken = tokens.GetProperty("accessToken").GetString()!;
 
-        var userId = await GetUserIdAsync(email);
+        var userId = await GetUserIdAsync(email, factory);
         var deviceId = Guid.NewGuid();
         var participantId = Guid.NewGuid();
-        await using var scope = _factory.Services.CreateAsyncScope();
+        await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
         db.Devices.Add(new Device
         {
@@ -308,9 +384,9 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         return new TestParticipant(accessToken, publisher.SessionId, deviceId, participantId);
     }
 
-    private async Task<WebSocket> ConnectAsync(TestParticipant participant)
+    private async Task<WebSocket> ConnectAsync(TestParticipant participant, SonicRelayApiFactory? factory = null)
     {
-        var client = _factory.Server.CreateWebSocketClient();
+        var client = (factory ?? _factory).Server.CreateWebSocketClient();
         client.ConfigureRequest = request =>
             request.Headers.Authorization = $"Bearer {participant.AccessToken}";
         return await client.ConnectAsync(

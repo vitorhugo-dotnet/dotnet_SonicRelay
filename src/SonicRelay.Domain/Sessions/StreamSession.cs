@@ -44,4 +44,11 @@ public static class ParticipantStatuses
 {
     public const string Connected = "connected";
     public const string Disconnected = "disconnected";
+
+    /// <summary>
+    /// The participant's socket dropped but the reconnect grace period has not elapsed yet.
+    /// The participant is still considered part of the session and can resume without
+    /// creating a duplicate row.
+    /// </summary>
+    public const string Reconnecting = "reconnecting";
 }

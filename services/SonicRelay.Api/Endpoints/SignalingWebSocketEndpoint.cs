@@ -2,6 +2,7 @@ using System.Net.WebSockets;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using SonicRelay.Application.Abstractions;
 using SonicRelay.Api.Services;
 using SonicRelay.Domain.Devices;
@@ -28,7 +29,8 @@ public static class SignalingWebSocketEndpoint
     }
 
     private static async Task HandleAsync(HttpContext context, UserManager<ApplicationUser> userManager,
-        AppDbContext db, IConnectionRegistry registry, ILoggerFactory loggerFactory,
+        AppDbContext db, IConnectionRegistry registry, IParticipantReconnectTracker reconnectTracker,
+        IServiceScopeFactory scopeFactory, IConfiguration configuration, ILoggerFactory loggerFactory,
         Observability.SonicRelayMetrics metrics)
     {
         var logger = loggerFactory.CreateLogger("SonicRelay.Signaling");
@@ -106,6 +108,10 @@ public static class SignalingWebSocketEndpoint
                 socketSendLock.Release();
             }
         }
+        // A reconnect within the grace period reuses the same participant row (no duplicate),
+        // so peers should be told this is a resumed connection rather than a brand-new join.
+        var isGracePeriodReconnect = reconnectTracker.TryCancelGracePeriod(participant.Id);
+
         var connectionId = Guid.NewGuid().ToString("N");
         await registry.RegisterAsync(new ConnectionDescriptor(
             connectionId, sessionId, participant.Id, user.Id, deviceId, participant.Role,
@@ -119,14 +125,15 @@ public static class SignalingWebSocketEndpoint
         await db.SaveChangesAsync(context.RequestAborted);
         metrics.ConnectionOpened(sessionId);
         logger.LogInformation(
-            "Connected signaling participant {ParticipantId} to session {SessionId} with connection {ConnectionId}",
-            participant.Id, sessionId, connectionId);
+            "Connected signaling participant {ParticipantId} to session {SessionId} with connection {ConnectionId} (graceReconnect={IsGraceReconnect})",
+            participant.Id, sessionId, connectionId, isGracePeriodReconnect);
 
         try
         {
             await SendEnvelopeAsync(SendFrameAsync, "session.joined", sessionId, null, participant.Id,
                 new { participantId = participant.Id, role = participant.Role }, context.RequestAborted);
-            await BroadcastAsync(registry, sessionId, participant.Id, "session.joined", participant.Id,
+            var peerAnnouncementType = isGracePeriodReconnect ? "participant.reconnected" : "session.joined";
+            await BroadcastAsync(registry, sessionId, participant.Id, peerAnnouncementType, participant.Id,
                 new { participantId = participant.Id, role = participant.Role }, context.RequestAborted);
             await ReceiveLoopAsync(socket, SendFrameAsync, sessionId, participant.Id, db, registry, logger, metrics,
                 context.RequestAborted);
@@ -135,12 +142,8 @@ public static class SignalingWebSocketEndpoint
         {
             metrics.ConnectionClosed(sessionId);
             await registry.UnregisterAsync(connectionId, CancellationToken.None);
-            await MarkDisconnectedAsync(db, participant.Id, connectionId);
-            logger.LogInformation(
-                "Disconnected signaling participant {ParticipantId} from session {SessionId} with connection {ConnectionId}",
-                participant.Id, sessionId, connectionId);
-            await BroadcastAsync(registry, sessionId, participant.Id, "session.left", participant.Id,
-                new { participantId = participant.Id }, CancellationToken.None);
+            await HandleDisconnectAsync(db, registry, reconnectTracker, scopeFactory, configuration, logger,
+                sessionId, participant.Id, connectionId);
 
             if (socket.State is WebSocketState.Open or WebSocketState.CloseReceived)
             {
@@ -154,6 +157,55 @@ public static class SignalingWebSocketEndpoint
                 }
             }
         }
+    }
+
+    /// <summary>
+    /// On socket drop, a still-live session gets a reconnect grace period: peers are told the
+    /// participant is transiently disconnected (not gone), and "session.left" only fires if the
+    /// participant hasn't reconnected once the grace period elapses. A terminal session (or a
+    /// zero/negative grace period) finalizes immediately, matching the prior behavior.
+    /// </summary>
+    private static async Task HandleDisconnectAsync(AppDbContext db, IConnectionRegistry registry,
+        IParticipantReconnectTracker reconnectTracker, IServiceScopeFactory scopeFactory,
+        IConfiguration configuration, ILogger logger, Guid sessionId, Guid participantId, string connectionId)
+    {
+        var sessionStillLive = !await SessionEndedAsync(db, sessionId, CancellationToken.None);
+        var graceDuration = TimeSpan.FromSeconds(
+            Math.Max(0, configuration.GetValue("Sessions:ParticipantDisconnectGraceSeconds", 15)));
+
+        if (!sessionStillLive || graceDuration <= TimeSpan.Zero)
+        {
+            await FinalizeDisconnectAsync(db, participantId, connectionId);
+            logger.LogInformation(
+                "Disconnected signaling participant {ParticipantId} from session {SessionId} with connection {ConnectionId}",
+                participantId, sessionId, connectionId);
+            await BroadcastAsync(registry, sessionId, participantId, "session.left", participantId,
+                new { participantId }, CancellationToken.None);
+            return;
+        }
+
+        await MarkReconnectingAsync(db, participantId, connectionId);
+        logger.LogInformation(
+            "Participant {ParticipantId} disconnected from session {SessionId} with connection {ConnectionId}; starting a {GraceSeconds}s reconnect grace period",
+            participantId, sessionId, connectionId, graceDuration.TotalSeconds);
+        await BroadcastAsync(registry, sessionId, participantId, "participant.disconnected", participantId,
+            new { participantId }, CancellationToken.None);
+
+        reconnectTracker.BeginGracePeriod(participantId, graceDuration, async () =>
+        {
+            // The request's scoped AppDbContext is disposed by the time this fires, so a fresh
+            // scope is required; the connection registry is a singleton and safe to reuse.
+            await using var scope = scopeFactory.CreateAsyncScope();
+            var scopedDb = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var finalized = await FinalizeDisconnectAsync(scopedDb, participantId, connectionId);
+            if (!finalized) return;
+
+            logger.LogInformation(
+                "Participant {ParticipantId} did not reconnect within the grace period for session {SessionId}; marking as left",
+                participantId, sessionId);
+            await BroadcastAsync(registry, sessionId, participantId, "session.left", participantId,
+                new { participantId }, CancellationToken.None);
+        });
     }
 
     private static async Task ReceiveLoopAsync(WebSocket socket,
@@ -290,20 +342,44 @@ public static class SignalingWebSocketEndpoint
             || state.CodeExpiresAt <= DateTimeOffset.UtcNow;
     }
 
-    private static async Task MarkDisconnectedAsync(AppDbContext db, Guid participantId, string connectionId)
+    private static async Task MarkReconnectingAsync(AppDbContext db, Guid participantId, string connectionId)
     {
         try
         {
             var participant = await db.SessionParticipants.SingleOrDefaultAsync(x => x.Id == participantId);
             if (participant?.ConnectionId != connectionId) return;
             participant.ConnectionId = null;
-            participant.Status = ParticipantStatuses.Disconnected;
-            participant.LeftAt = DateTimeOffset.UtcNow;
+            participant.Status = ParticipantStatuses.Reconnecting;
             await db.SaveChangesAsync();
         }
         catch (Exception exception) when (exception is DbUpdateException or OperationCanceledException)
         {
             // Connection cleanup must not mask the socket termination.
+        }
+    }
+
+    /// <summary>Marks a participant as finally left. Returns false if a newer connection already claimed the row.</summary>
+    private static async Task<bool> FinalizeDisconnectAsync(AppDbContext db, Guid participantId, string connectionId)
+    {
+        try
+        {
+            var participant = await db.SessionParticipants.SingleOrDefaultAsync(x => x.Id == participantId);
+            if (participant is null) return false;
+            // Already finalized (idempotent) or a newer connection has since claimed this
+            // participant; that connection's own lifecycle now owns the participant's fate.
+            if (participant.Status == ParticipantStatuses.Disconnected) return false;
+            if (participant.Status == ParticipantStatuses.Connected && participant.ConnectionId != connectionId)
+                return false;
+            participant.ConnectionId = null;
+            participant.Status = ParticipantStatuses.Disconnected;
+            participant.LeftAt = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync();
+            return true;
+        }
+        catch (Exception exception) when (exception is DbUpdateException or OperationCanceledException)
+        {
+            // Connection cleanup must not mask the socket termination.
+            return false;
         }
     }
 

@@ -28,6 +28,7 @@ public static class InfrastructureServiceCollectionExtensions
             options.Configuration = configuration["Redis:ConnectionString"]);
         services.AddSingleton<ISessionCodeStore, RedisSessionCodeStore>();
         services.AddSingleton<IConnectionRegistry, InMemoryConnectionRegistry>();
+        services.AddSingleton<IParticipantReconnectTracker, InMemoryParticipantReconnectTracker>();
         return services;
     }
 }

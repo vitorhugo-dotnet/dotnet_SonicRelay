@@ -187,7 +187,22 @@ The server emits a normalized routed frame:
 }
 ```
 
-`session.joined`, `session.left`, `session.ended`, and `error` are server-generated types and are rejected when sent by a client. Routing is constrained to the current session. Errors use the canonical envelope with `type: "error"` and a payload such as `{ "code": "participant_not_found" }`. Other error codes are `invalid_message`, `unsupported_message_type` and `invalid_recipient`.
+`session.joined`, `session.left`, `session.ended`, `participant.disconnected`, `participant.reconnected`, and `error` are server-generated types and are rejected when sent by a client. Routing is constrained to the current session. Errors use the canonical envelope with `type: "error"` and a payload such as `{ "code": "participant_not_found" }`. Other error codes are `invalid_message`, `unsupported_message_type` and `invalid_recipient`.
+
+### Reconnect grace period
+
+A dropped signaling socket does not immediately tear down the participant. When the underlying
+session is still live, the server holds the participant in a `reconnecting` state for
+`Sessions:ParticipantDisconnectGraceSeconds` (default `15`, configurable via
+`Sessions__ParticipantDisconnectGraceSeconds`) before finalizing it as left:
+
+1. On disconnect, other participants receive `participant.disconnected` with `{ "participantId": "<uuid>" }`. Treat this as "peer is transiently unreachable" — keep the peer connection and wait, do not tear it down yet.
+2. If the same participant (same session, user and device) reconnects its WebSocket within the grace period, the reused participant row is reported to peers as `participant.reconnected` (same payload shape as `session.joined`: `{ "participantId": "<uuid>", "role": "publisher" | "viewer" }`) instead of a fresh `session.joined`. The reconnecting client itself always gets `session.joined` about itself, as on a first connect, so it can confirm its `participantId`. Clients should resume the existing peer connection on `participant.reconnected`, restarting ICE or renegotiating rather than starting over from scratch.
+3. If the grace period elapses without a reconnect, the participant is finalized as disconnected and peers receive the usual `session.left`.
+
+A participant that rejoins via `POST /api/sessions/join` before reopening its WebSocket (a full manual reconnect) also cancels any pending grace period once its new WebSocket connects, so both a lightweight socket-only retry and a full re-authenticate-and-rejoin flow converge on the same `participant.reconnected` signal. Ending a session (`POST /api/sessions/{sessionId}/end`) always wins immediately over a pending grace period.
+
+The server never automatically reconnects to a session that has already ended or expired; clients must treat `session.ended`, socket closure without any of the above server messages, and HTTP `410`/`404` as terminal and stop retrying that session.
 
 SDP and ICE payloads are opaque JSON to the API. SDP describes the peer media/session parameters, and ICE candidates describe network paths discovered by the peers. The server forwards those payloads unchanged and never writes their content to logs; routing logs contain only message type, session ID, sender ID, recipient ID, and message ID.
 

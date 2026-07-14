@@ -268,6 +268,39 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.Equal(SessionStatuses.Ended, ended.GetProperty("status").GetString());
     }
 
+    [Fact]
+    public async Task Ending_a_session_finalizes_participants_mid_reconnect_grace_period()
+    {
+        var (owner, sessionId, _) = await CreateSessionAsync("end-grace-owner", 2);
+        var participantId = Guid.NewGuid();
+        await using (var scope = _factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var session = await db.StreamSessions.SingleAsync(x => x.Id == sessionId);
+            db.SessionParticipants.Add(new SessionParticipant
+            {
+                Id = participantId,
+                SessionId = sessionId,
+                UserId = session.OwnerUserId,
+                DeviceId = session.SourceDeviceId,
+                Role = ParticipantRoles.Viewer,
+                ConnectionId = null,
+                Status = ParticipantStatuses.Reconnecting,
+                JoinedAt = DateTimeOffset.UtcNow.AddSeconds(-5)
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var end = await owner.Client.PostAsync($"/api/sessions/{sessionId}/end", null);
+        Assert.Equal(HttpStatusCode.OK, end.StatusCode);
+
+        await using var assertScope = _factory.Services.CreateAsyncScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var participant = await assertDb.SessionParticipants.SingleAsync(x => x.Id == participantId);
+        Assert.Equal(ParticipantStatuses.Disconnected, participant.Status);
+        Assert.NotNull(participant.LeftAt);
+    }
+
     private async Task<(TestUser Owner, Guid SessionId, string Code)> CreateSessionAsync(string prefix, int maxViewers,
         SonicRelayApiFactory? factory = null)
     {

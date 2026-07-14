@@ -64,6 +64,7 @@ Sessions__MaxViewersPerSession=3
 Sessions__CleanupEnabled=true
 Sessions__CleanupIntervalSeconds=60
 Sessions__DisconnectedParticipantRetentionHours=24
+Sessions__ParticipantDisconnectGraceSeconds=15
 Swagger__Enabled=false
 ```
 
