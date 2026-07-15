@@ -27,14 +27,23 @@ reason — only the generic "disconnected" log lines fire, indistinguishable fro
 close.
 
 Add a `catch` that classifies the exception into a fixed, low-cardinality reason (safe as
-a metric label, matching the existing convention in `Observability.SonicRelayMetrics`):
+a metric label, matching the existing convention in `Observability.SonicRelayMetrics`).
+Verified empirically against this codebase (a scratch instrumented run against the
+existing `Signaling_reconnecting_within_the_grace_period_...` test's abrupt
+`viewerSocket.Dispose()`): an abrupt client-side drop surfaces on the server as a plain
+`System.IO.IOException` ("The remote end closed the connection"), **not**
+`WebSocketException` — so `IOException` must map to `transport_error`, distinct from the
+two explicit `WebSocketException` throws already in `ReceiveMessageAsync`
+(`WebSocketError.InvalidMessageType` for a non-text frame, `WebSocketError.HeaderError` for
+an oversized message), which are genuine client protocol violations and map to
+`protocol_error`:
 
 | Exception | Reason |
 | --- | --- |
-| Loop returns normally (client sent Close frame) | `normal_closure` |
+| Loop returns normally (client sent a Close frame) | `normal_closure` |
 | `OperationCanceledException` (request aborted) | `cancelled` |
-| `WebSocketException` (protocol/frame error, oversized message) | `protocol_error` |
-| Any other `IOException`/`WebSocketException` from the transport | `transport_error` |
+| `WebSocketException` with `WebSocketErrorCode` in `{InvalidMessageType, HeaderError}` | `protocol_error` |
+| Any other `IOException` or `WebSocketException` (abrupt drop, reset, etc.) | `transport_error` |
 | Anything else unexpected | `unknown` |
 
 This reason is logged (`logger.LogWarning("Signaling connection closed abnormally for
@@ -46,19 +55,35 @@ counters.
 
 ## Part B — Coturn Prometheus metrics
 
-`deploy/docker-compose.prodcoturn.yml` runs coturn purely through CLI args (no mounted
-config) and does not pass `--prometheus`, so the only visibility into coturn today is
-container-level network drop counters (cAdvisor) and raw logs (Loki) — no allocation
-count, no relayed traffic volume, no session count from coturn itself.
+There are two independent coturn definitions in this repo, and neither enables coturn's
+native Prometheus metrics today — only container-level network drop counters (cAdvisor)
+and raw logs (Loki) are visible, no allocation count, no relayed traffic volume, no
+session count from coturn itself:
 
-Add `--prometheus` to the `command:` list. Coturn's Prometheus listener defaults to port
-9641; since the container already runs with `network_mode: host`, no `ports:` mapping is
-needed — the port is already reachable wherever Prometheus can reach the host. Document
-in the compose file's existing comment block that 9641 should stay closed to anything
-except the Prometheus scrape source (it is not meant to be public).
+1. **`deploy/docker-compose.prodcoturn.yml`** — the real production path (host
+   networking, CLI-args only, no mounted config; the file's own comments steer operators
+   here instead of (2) below because Docker's bridge/userland proxy drops UDP under
+   load). Add `--prometheus` to its `command:` list.
+2. **`infra/coturn/turnserver.conf`** — used by `infra/compose.yml`'s dev `coturn`
+   service (`command: ["-c", "/etc/coturn/turnserver.conf"]`, file mounted read-only) and
+   inherited as-is by `infra/compose.prod.yml`'s `coturn` service (that override only adds
+   a `profiles`/`ports` block, not a different `command`/`volumes`). Add a bare
+   `prometheus` line to this file, next to the existing `listening-port=3478` etc. — it
+   takes no value and needs no `${VAR}` substitution, so it is unaffected by this file's
+   existing (pre-existing, out of scope here) placeholder-substitution limitation noted in
+   its own header comment.
+
+Coturn's Prometheus listener defaults to port 9641. For (1), since the container already
+runs with `network_mode: host`, no `ports:` mapping is needed — the port is already
+reachable wherever Prometheus can reach the host; document in the compose file's existing
+comment block that 9641 should stay closed to anything except the Prometheus scrape
+source (it is not meant to be public). For (2), add `"9641:9641"` to both
+`infra/compose.dev.yml`'s and `infra/compose.prod.yml`'s coturn `ports:` blocks, the same
+way 3478/5349/49160-49200 are already published there.
 
 Add a `sonicrelay-coturn` job to `observability/prometheus/sonicrelay-scrape.yml`
-targeting `<host>:9641`, and extend the existing Grafana dashboard
+targeting `<host>:9641` (the production host for (1); compose service name `coturn:9641`
+is enough for local/dev scraping of (2)), and extend the existing Grafana dashboard
 (`sonicrelay-webrtc-turn-dashboard.json`) with a new row using coturn's native metrics
 (active allocations, relayed traffic bytes, total sessions) alongside the existing
 "Container network drops (api + coturn)" panel, so a relay-side capacity or traffic
