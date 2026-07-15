@@ -166,9 +166,24 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     [Fact]
     public async Task Signaling_records_a_transport_error_reason_when_a_participant_drops_abruptly()
     {
-        var publisher = await CreateParticipantAsync("disconnect-reason-publisher");
-        using var publisherSocket = await ConnectAsync(publisher);
+        // Prometheus's `Metrics.CreateCounter` (used by SonicRelayMetrics) registers into the
+        // process-wide static default CollectorRegistry, not a registry scoped to this host —
+        // so every SonicRelayApiFactory instance in this test process shares the exact same
+        // sonicrelay_signaling_disconnect_reason_total counter. A dedicated factory isolates the
+        // in-memory database, but NOT the metric: other tests in this file (and in
+        // WebRtcObservabilityTests, which directly calls RecordDisconnectReason("transport_error"))
+        // independently push the same "transport_error" label into that shared counter. A
+        // presence-only assertion would therefore pass even if this test's own trigger were
+        // misclassified. Use a before/after delta on the counter value instead so the assertion
+        // only passes if THIS test's Dispose() actually caused an increment.
+        await using var factory = new SonicRelayApiFactory();
+        var publisher = await CreateParticipantAsync("disconnect-reason-publisher", factory);
+        using var publisherSocket = await ConnectAsync(publisher, factory);
         await ReceiveAsync(publisherSocket);
+
+        var client = factory.CreateClient();
+        const string metricLine = "sonicrelay_signaling_disconnect_reason_total{reason=\"transport_error\"}";
+        var baseline = ParseCounterValue(await client.GetStringAsync("/metrics"), metricLine);
 
         // An abrupt client-side Dispose (no close handshake) is the same trigger the
         // existing grace-period tests use to simulate a dropped connection; verified in
@@ -176,18 +191,36 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         // WebSocketException — see this plan's Global Constraints.
         publisherSocket.Dispose();
 
-        var client = _factory.CreateClient();
         string metricsBody;
+        double afterValue;
         using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         do
         {
             metricsBody = await client.GetStringAsync("/metrics");
-            if (metricsBody.Contains("sonicrelay_signaling_disconnect_reason_total{reason=\"transport_error\"}"))
+            afterValue = ParseCounterValue(metricsBody, metricLine);
+            if (afterValue > baseline)
                 break;
             await Task.Delay(50, timeout.Token);
         } while (!timeout.IsCancellationRequested);
 
-        Assert.Contains("sonicrelay_signaling_disconnect_reason_total{reason=\"transport_error\"}", metricsBody);
+        Assert.True(afterValue > baseline,
+            $"Expected {metricLine} to increase above its baseline of {baseline} after the abrupt " +
+            $"disconnect, but it was still {afterValue}. Metrics body:\n{metricsBody}");
+    }
+
+    private static double ParseCounterValue(string metricsBody, string metricLine)
+    {
+        foreach (var line in metricsBody.Split('\n'))
+        {
+            if (!line.StartsWith(metricLine, StringComparison.Ordinal))
+                continue;
+            var valueText = line[metricLine.Length..].Trim();
+            if (double.TryParse(valueText, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out var value))
+                return value;
+        }
+
+        return 0d;
     }
 
     [Fact]
