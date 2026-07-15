@@ -1,3 +1,4 @@
+using System.IO;
 using System.Net.WebSockets;
 using System.Text.Json;
 using Microsoft.AspNetCore.Identity;
@@ -27,6 +28,26 @@ public static class SignalingWebSocketEndpoint
             .RequireAuthorization("AuthenticatedUser");
         return app;
     }
+
+    private enum SignalingDisconnectReason { NormalClosure, Cancelled, ProtocolError, TransportError, Unknown }
+
+    private static SignalingDisconnectReason ClassifyDisconnect(Exception exception) => exception switch
+    {
+        OperationCanceledException => SignalingDisconnectReason.Cancelled,
+        WebSocketException { WebSocketErrorCode: WebSocketError.InvalidMessageType or WebSocketError.HeaderError } =>
+            SignalingDisconnectReason.ProtocolError,
+        WebSocketException or IOException => SignalingDisconnectReason.TransportError,
+        _ => SignalingDisconnectReason.Unknown,
+    };
+
+    private static string ToMetricReason(SignalingDisconnectReason reason) => reason switch
+    {
+        SignalingDisconnectReason.NormalClosure => "normal_closure",
+        SignalingDisconnectReason.Cancelled => "cancelled",
+        SignalingDisconnectReason.ProtocolError => "protocol_error",
+        SignalingDisconnectReason.TransportError => "transport_error",
+        _ => "unknown",
+    };
 
     private static async Task HandleAsync(HttpContext context, UserManager<ApplicationUser> userManager,
         AppDbContext db, IConnectionRegistry registry, IParticipantReconnectTracker reconnectTracker,
@@ -137,6 +158,16 @@ public static class SignalingWebSocketEndpoint
                 new { participantId = participant.Id, role = participant.Role }, context.RequestAborted);
             await ReceiveLoopAsync(socket, SendFrameAsync, sessionId, participant.Id, db, registry, logger, metrics,
                 context.RequestAborted);
+            metrics.RecordDisconnectReason(ToMetricReason(SignalingDisconnectReason.NormalClosure));
+        }
+        catch (Exception exception)
+        {
+            var reason = ClassifyDisconnect(exception);
+            logger.LogWarning(
+                "Signaling connection closed abnormally for participant {ParticipantId} in session {SessionId}: {Reason}",
+                participant.Id, sessionId, reason);
+            metrics.RecordDisconnectReason(ToMetricReason(reason));
+            throw;
         }
         finally
         {

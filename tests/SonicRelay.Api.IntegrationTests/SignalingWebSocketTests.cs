@@ -164,6 +164,33 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     }
 
     [Fact]
+    public async Task Signaling_records_a_transport_error_reason_when_a_participant_drops_abruptly()
+    {
+        var publisher = await CreateParticipantAsync("disconnect-reason-publisher");
+        using var publisherSocket = await ConnectAsync(publisher);
+        await ReceiveAsync(publisherSocket);
+
+        // An abrupt client-side Dispose (no close handshake) is the same trigger the
+        // existing grace-period tests use to simulate a dropped connection; verified in
+        // this sandbox that it surfaces server-side as a plain IOException, not
+        // WebSocketException — see this plan's Global Constraints.
+        publisherSocket.Dispose();
+
+        var client = _factory.CreateClient();
+        string metricsBody;
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        do
+        {
+            metricsBody = await client.GetStringAsync("/metrics");
+            if (metricsBody.Contains("sonicrelay_signaling_disconnect_reason_total{reason=\"transport_error\"}"))
+                break;
+            await Task.Delay(50, timeout.Token);
+        } while (!timeout.IsCancellationRequested);
+
+        Assert.Contains("sonicrelay_signaling_disconnect_reason_total{reason=\"transport_error\"}", metricsBody);
+    }
+
+    [Fact]
     public async Task Signaling_finalizes_as_left_after_the_grace_period_elapses_without_reconnecting()
     {
         await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
