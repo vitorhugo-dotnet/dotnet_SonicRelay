@@ -142,7 +142,7 @@
     },
     {
       "type": "stat",
-      "title": "Coturn: total sessions",
+      "title": "Coturn: total allocations",
       "description": "Coturn does not expose a distinct 'sessions' metric family separate from allocations; this reuses turn_total_allocations (the TURN-allocation gauge) as the closest available proxy for active session count, per coturn maintainer guidance (github.com/coturn/coturn/discussions/1091). Verified against public documentation/discussion, not against a live instance (no Docker daemon in the dev sandbox that produced this) — confirm against real /metrics output before relying on this in production.",
       "gridPos": { "h": 8, "w": 8, "x": 16, "y": 46 },
       "datasource": { "type": "prometheus", "uid": "${prometheus}" },

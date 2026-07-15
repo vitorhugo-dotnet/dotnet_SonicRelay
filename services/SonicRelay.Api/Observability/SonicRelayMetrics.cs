@@ -7,7 +7,7 @@ namespace SonicRelay.Api.Observability;
 /// SonicRelay's Prometheus metrics for WebRTC/TURN observability (issue #21). Exposed at
 /// <c>/metrics</c>. Deliberately avoids high-cardinality labels: no session ids, IPs, SDP
 /// or ICE candidates are ever used as label values — only bounded enums (message type,
-/// transport mode, participant role, error reason).
+/// transport mode, participant role, error reason, disconnect reason).
 /// </summary>
 public sealed class SonicRelayMetrics
 {

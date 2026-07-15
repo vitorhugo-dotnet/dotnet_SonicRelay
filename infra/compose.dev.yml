@@ -28,6 +28,7 @@ services:
       - "3478:3478/tcp"
       - "5349:5349/tcp"
       - "49160-49200:49160-49200/udp"
+      # 9641 (metrics) only needs to be reachable by Prometheus, not public.
       - "9641:9641"
 
   pgadmin:
