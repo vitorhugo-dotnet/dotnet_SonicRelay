@@ -365,10 +365,15 @@ public static class SignalingWebSocketEndpoint
         {
             var participant = await db.SessionParticipants.SingleOrDefaultAsync(x => x.Id == participantId);
             if (participant is null) return false;
-            // Already finalized (idempotent) or a newer connection has since claimed this
-            // participant; that connection's own lifecycle now owns the participant's fate.
+            // Already finalized (idempotent) or a different, still-live connection has since
+            // claimed this participant; that connection's own lifecycle now owns its fate. A
+            // null ConnectionId does NOT count as "claimed" here: the HTTP rejoin path
+            // (SessionEndpoints.JoinAsync) sets Status back to Connected without touching
+            // ConnectionId, so a client that rejoins over HTTP but crashes before reopening the
+            // WebSocket would otherwise look "claimed" forever and never get finalized.
             if (participant.Status == ParticipantStatuses.Disconnected) return false;
-            if (participant.Status == ParticipantStatuses.Connected && participant.ConnectionId != connectionId)
+            if (participant.Status == ParticipantStatuses.Connected
+                && participant.ConnectionId is not null && participant.ConnectionId != connectionId)
                 return false;
             participant.ConnectionId = null;
             participant.Status = ParticipantStatuses.Disconnected;

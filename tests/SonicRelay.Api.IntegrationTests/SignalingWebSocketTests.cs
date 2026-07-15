@@ -197,6 +197,52 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         Assert.NotNull(participantRow.LeftAt);
     }
 
+    [Fact]
+    public async Task Signaling_finalizes_a_participant_that_rejoined_over_http_but_never_reopened_the_socket()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Sessions:ParticipantDisconnectGraceSeconds"] = "1"
+        });
+        var publisher = await CreateParticipantAsync("http-rejoin-publisher", factory);
+        var viewer = await CreateViewerAsync(publisher, "http-rejoin-viewer", factory);
+        using var publisherSocket = await ConnectAsync(publisher, factory);
+        await ReceiveAsync(publisherSocket);
+
+        var viewerSocket = await ConnectAsync(viewer, factory);
+        await ReceiveAsync(viewerSocket);
+        await ReceiveAsync(publisherSocket); // session.joined announcement
+
+        viewerSocket.Dispose();
+        using var disconnectTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        await ReceiveAsync(publisherSocket, disconnectTimeout.Token); // participant.disconnected
+
+        // The documented full-reconnect flow calls POST /api/sessions/join before reopening the
+        // WebSocket (SessionEndpoints.JoinAsync's existing-viewer branch sets Status back to
+        // Connected without touching ConnectionId). Simulate that HTTP leg completing while the
+        // client crashes before ever reopening the socket, so ConnectionId stays null.
+        await using (var scope = factory.Services.CreateAsyncScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var participantRow = await db.SessionParticipants.SingleAsync(x => x.Id == viewer.ParticipantId);
+            participantRow.Status = ParticipantStatuses.Connected;
+            participantRow.LeftAt = null;
+            await db.SaveChangesAsync();
+        }
+
+        // The grace timer must still finalize this participant once it expires — a null
+        // ConnectionId is not a live socket that "claimed" the row.
+        using var leftTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var left = await ReceiveAsync(publisherSocket, leftTimeout.Token);
+        AssertEnvelope(left, "session.left", publisher.SessionId);
+        Assert.Equal(viewer.ParticipantId, left.GetProperty("payload").GetProperty("participantId").GetGuid());
+
+        await using var assertScope = factory.Services.CreateAsyncScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        var finalRow = await assertDb.SessionParticipants.SingleAsync(x => x.Id == viewer.ParticipantId);
+        Assert.Equal(ParticipantStatuses.Disconnected, finalRow.Status);
+    }
+
     [Theory]
     [InlineData("unsupported.type", "unsupported_message_type")]
     [InlineData("session.ended", "unsupported_message_type")]

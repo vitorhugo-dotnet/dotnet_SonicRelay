@@ -202,6 +202,8 @@ session is still live, the server holds the participant in a `reconnecting` stat
 
 A participant that rejoins via `POST /api/sessions/join` before reopening its WebSocket (a full manual reconnect) also cancels any pending grace period once its new WebSocket connects, so both a lightweight socket-only retry and a full re-authenticate-and-rejoin flow converge on the same `participant.reconnected` signal. Ending a session (`POST /api/sessions/{sessionId}/end`) always wins immediately over a pending grace period.
 
+A viewer mid-grace-period still holds its viewer slot: `POST /api/sessions/join`'s capacity check counts `reconnecting` viewers alongside `connected` ones, so a dropped viewer cannot be displaced by a new one joining during the grace window.
+
 The server never automatically reconnects to a session that has already ended or expired; clients must treat `session.ended`, socket closure without any of the above server messages, and HTTP `410`/`404` as terminal and stop retrying that session.
 
 SDP and ICE payloads are opaque JSON to the API. SDP describes the peer media/session parameters, and ICE candidates describe network paths discovered by the peers. The server forwards those payloads unchanged and never writes their content to logs; routing logs contain only message type, session ID, sender ID, recipient ID, and message ID.

@@ -211,8 +211,12 @@ public static class SessionEndpoints
             return Results.Ok(ToResponse(session));
         }
 
+        // Viewers mid-reconnect-grace-period still hold their slot, otherwise a new viewer
+        // could take it during the grace window and leave a maxViewers=1 session with two
+        // viewers once the original one's WebSocket reconnects.
         var viewerCount = await db.SessionParticipants.CountAsync(x => x.SessionId == session.Id
-            && x.Role == ParticipantRoles.Viewer && x.Status == ParticipantStatuses.Connected, ct);
+            && x.Role == ParticipantRoles.Viewer
+            && (x.Status == ParticipantStatuses.Connected || x.Status == ParticipantStatuses.Reconnecting), ct);
         if (viewerCount >= session.MaxViewers) return Results.Conflict(new { error = "Session viewer limit reached." });
 
         var participant = new SessionParticipant
