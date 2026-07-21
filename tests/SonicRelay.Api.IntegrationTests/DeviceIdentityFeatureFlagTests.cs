@@ -32,5 +32,13 @@ public sealed class DeviceIdentityFeatureFlagTests
 
         var meResponse = await client.GetAsync("/auth/me");
         Assert.Equal(HttpStatusCode.Unauthorized, meResponse.StatusCode);
+
+        // Guards against re-introducing the exact bug this test once caught:
+        // MapDeviceEndpoints() (the pre-existing, unrelated owner-scoped Device
+        // CRUD) must stay mapped regardless of this flag. If it were ever
+        // re-gated behind DeviceIdentity:Enabled, this unauthenticated GET would
+        // return 404 (route gone) instead of 401 (route present, auth required).
+        var devicesResponse = await client.GetAsync("/api/devices");
+        Assert.Equal(HttpStatusCode.Unauthorized, devicesResponse.StatusCode);
     }
 }
