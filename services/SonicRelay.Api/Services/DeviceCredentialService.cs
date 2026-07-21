@@ -1,6 +1,11 @@
+using System.Globalization;
+using System.IdentityModel.Tokens.Jwt;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Tokens;
+using SonicRelay.Domain.DeviceIdentities;
 using SonicRelay.Domain.Devices;
 
 namespace SonicRelay.Api.Services;
@@ -25,6 +30,30 @@ public sealed class DeviceCredentialService(IOptions<DeviceIdentityOptions> opti
         var computed = Convert.FromHexString(HashSecret(plaintextSecret));
         var expected = Convert.FromHexString(secretHash);
         return CryptographicOperations.FixedTimeEquals(computed, expected);
+    }
+
+    public (string AccessToken, DateTimeOffset ExpiresAt) IssueAccessToken(DeviceIdentity device)
+    {
+        var settings = options.Value;
+        var key = RequireKey(settings.TokenSigningKey, nameof(DeviceIdentityOptions.TokenSigningKey));
+        var now = time.GetUtcNow();
+        var expiresAt = now.AddMinutes(settings.AccessTokenMinutes);
+        var scopes = string.Join(' ', ScopesFor(device.DeviceType));
+
+        var claims = new[]
+        {
+            new Claim(JwtRegisteredClaimNames.Sub, device.Id.ToString()),
+            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new Claim("device_type", device.DeviceType),
+            new Claim("scope", scopes),
+            new Claim("cv", device.CredentialVersion.ToString(CultureInfo.InvariantCulture))
+        };
+        var credentials = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(key)), SecurityAlgorithms.HmacSha256);
+        var token = new JwtSecurityToken(
+            settings.Issuer, settings.Audience, claims, now.UtcDateTime, expiresAt.UtcDateTime, credentials);
+
+        return (new JwtSecurityTokenHandler().WriteToken(token), expiresAt);
     }
 
     public static IReadOnlyList<string> ScopesFor(string deviceType) => deviceType switch

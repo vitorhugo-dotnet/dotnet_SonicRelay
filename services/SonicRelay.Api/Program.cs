@@ -1,16 +1,21 @@
 using System.Security.Claims;
+using System.Text;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication.BearerToken;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.IdentityModel.Tokens;
 using Prometheus;
 using SonicRelay.Api.Endpoints;
 using SonicRelay.Api.Services;
 using SonicRelay.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
+
+var deviceIdentityEnabled = builder.Configuration.GetValue("DeviceIdentity:Enabled", true);
 
 // The signaling receive loop polls session state every second per socket, which
 // floods the console with EF `SELECT Status, CodeExpiresAt` command logs. Keep
@@ -66,6 +71,29 @@ builder.Services.PostConfigure<TurnOptions>(options =>
 });
 builder.Services.AddScoped<AccountDeletionService>();
 
+builder.Services.Configure<DeviceIdentityOptions>(builder.Configuration.GetSection("DeviceIdentity"));
+builder.Services.AddSingleton<DeviceCredentialService>();
+if (deviceIdentityEnabled)
+{
+    builder.Services.AddAuthentication().AddJwtBearer("DeviceBearer", jwtOptions =>
+    {
+        var deviceOptions = builder.Configuration.GetSection("DeviceIdentity").Get<DeviceIdentityOptions>()
+            ?? new DeviceIdentityOptions();
+        jwtOptions.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidIssuer = deviceOptions.Issuer,
+            ValidAudience = deviceOptions.Audience,
+            IssuerSigningKey = new SymmetricSecurityKey(
+                Encoding.UTF8.GetBytes(deviceOptions.TokenSigningKey ?? string.Empty)),
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ClockSkew = TimeSpan.FromSeconds(30)
+        };
+    });
+}
+
 // Notify n8n (or any webhook) when an account is deleted so an operator gets an email.
 // Falls back to a no-op when no webhook is configured (tests, local dev).
 var deletionWebhookUrl = builder.Configuration["Notifications:AccountDeletionWebhookUrl"];
@@ -107,6 +135,8 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("create-session", context => UserLimit(context, "RateLimits:CreateSession", 10));
     options.AddPolicy("join-session", context => UserLimit(context, "RateLimits:JoinSession", 10));
     options.AddPolicy("rotate-code", context => UserLimit(context, "RateLimits:RotateCode", 5));
+    options.AddPolicy("device-bootstrap", context => IpLimit(context, "RateLimits:DeviceBootstrap", 10));
+    options.AddPolicy("device-token", context => IpLimit(context, "RateLimits:DeviceToken", 10));
 });
 builder.Services.Configure<BearerTokenOptions>(IdentityConstants.BearerScheme, options =>
 {
@@ -149,6 +179,10 @@ app.MapAuthEndpoints();
 app.MapAccountEndpoints();
 app.MapAdminEndpoints();
 app.MapDeviceEndpoints();
+if (deviceIdentityEnabled)
+{
+    app.MapDeviceIdentityEndpoints();
+}
 app.MapSessionEndpoints();
 app.MapWebRtcEndpoints();
 app.MapSignalingWebSocketEndpoint();
