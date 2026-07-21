@@ -47,7 +47,7 @@ flowchart TD
 ## Components
 
 - `services/SonicRelay.Api`: Minimal API composition, rate limits, health checks, endpoint handlers, WebSocket signaling and session cleanup.
-- `src/SonicRelay.Domain`: user, device, session, participant and signaling-event models.
+- `src/SonicRelay.Domain`: user, device, session, participant and signaling-event models, and (Phase 1 of issue #26) a parallel device-identity credential and pairing model — see `docs/device-identity.md`.
 - `src/SonicRelay.Application`: abstractions for session-code storage and live connection routing.
 - `src/SonicRelay.Infrastructure`: EF Core/PostgreSQL persistence, Identity stores, Redis session-code storage and the in-memory connection registry.
 - `infra`: development and full-stack production Compose definitions, nginx and coturn configuration.
@@ -187,3 +187,4 @@ flowchart TD
 - [ADR 0002: Use Identity opaque bearer tokens](adr/0002-identity-bearer-tokens.md)
 - [ADR 0003: Split durable and ephemeral storage](adr/0003-postgresql-and-redis-storage.md)
 - [ADR 0004: Use authenticated WebSocket signaling](adr/0004-authenticated-websocket-signaling.md)
+- [ADR 0005: Symmetric device credentials with a parallel DeviceBearer scheme](adr/0005-device-identity-credentials.md)

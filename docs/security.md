@@ -33,6 +33,18 @@ The named policies `CanRegisterDevice`, `CanCreateSession`, `CanJoinSession`, `C
 
 Current limitation: successful join lookup does not consume a code. A code can be reused until rotation, session end or expiry.
 
+### Device identity credentials (Phase 1 of issue #26)
+
+- Device bootstrap issues a high-entropy secret once; only its HMAC-SHA-256
+  output, keyed by `DeviceIdentity:CredentialHmacKey`, is persisted.
+- Access tokens are short-lived JWTs on a separate `DeviceBearer` scheme;
+  every scoped request re-checks device status and credential version against
+  the database, so rotation and revocation take effect immediately.
+- Pairing codes follow the session-code convention: HMAC-hashed, short TTL,
+  attempt-limited, and indistinguishable failure responses.
+- The entire flow is gated by `DeviceIdentity:Enabled` and does not affect
+  the existing Identity login endpoints.
+
 ### Abuse and data exposure
 
 - Fixed-window limits return `429`: login and refresh are keyed by IP; create, join and rotate are keyed by user ID (falling back to IP).
