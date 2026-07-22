@@ -312,6 +312,22 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
+    public async Task A_publisher_device_cannot_end_or_rotate_another_publishers_session()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (otherPublisherClient, _) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
+
+        var end = await otherPublisherClient.PostAsync($"/api/sessions/{sessionId}/end", null);
+        var rotate = await otherPublisherClient.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+
+        // Unlike the viewer case above, this caller does hold the "session:end" scope, so the
+        // policy check passes and this actually exercises SessionEndpoints' own ownership guard
+        // (SourceDeviceId == device.Id) rather than being rejected before the handler runs.
+        Assert.Equal(HttpStatusCode.NotFound, end.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, rotate.StatusCode);
+    }
+
+    [Fact]
     public async Task Two_independent_device_pairs_do_not_see_each_others_sessions()
     {
         var (firstOwnerClient, firstSessionId, _) = await CreateSessionAsync();
