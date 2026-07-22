@@ -65,25 +65,47 @@ New scoped policies follow the exact `DeviceScopeRequirement` +
 `pairing:*`: `session:create`, `session:join`, `session:end`,
 `signaling:connect`, `turn:credentials`.
 
-A separate, unscoped `DeviceAuthenticated` policy is also added
-(`AddAuthenticationSchemes("DeviceBearer")` + `RequireAuthenticatedUser()`,
-no `DeviceScopeRequirement`) for routes that only need "caller is some valid
-device," not a specific capability: `GET /api/sessions/active`,
-`GET /api/sessions/{id}`, `POST /api/sessions/{id}/end`,
-`POST /api/sessions/{id}/rotate-code`, and `POST /api/webrtc/stats`. This
-matters because the session/webrtc endpoint groups today use bare
-`RequireAuthorization()`, which authenticates against the app's *default*
-scheme (`Identity.Bearer`) — the same scheme-pinning gap Phase 1 hit once
-already (see the Phase 1 spec's `MapInboundClaims` finding). Every
-device-facing route in this phase must explicitly reference a policy that
-pins `DeviceBearer`; none may rely on bare `RequireAuthorization()`.
+A separate `DeviceAuthenticated` policy is also added for routes that only
+need "caller is some currently-active device," not a specific capability:
+`GET /api/sessions/active`, `GET /api/sessions/{id}`, and
+`POST /api/webrtc/stats`. This matters because the session/webrtc endpoint
+groups today use bare `RequireAuthorization()`, which authenticates against
+the app's *default* scheme (`Identity.Bearer`) — the same scheme-pinning gap
+Phase 1 hit once already (see the Phase 1 spec's `MapInboundClaims`
+finding). Every device-facing route in this phase must explicitly reference
+a policy that pins `DeviceBearer`; none may rely on bare
+`RequireAuthorization()`.
 
-`CanRegisterDevice`, `CanCreateSession`, `CanJoinSession`, `CanPublishSession`,
-`CanViewSession` are removed — they were undifferentiated
-`RequireAuthenticatedUser()` stubs, and `CanPublishSession`/`CanViewSession`
-were never referenced by any route. `CanRegisterDevice` is confirmed unused
-by the old `Device` CRUD (which relies on the group-level `RequireAuthorization()`
-plus in-code `DeviceAccess.CheckAsync`) before removal.
+Naively defining `DeviceAuthenticated` as `RequireAuthenticatedUser()` alone
+would reopen a gap: `DeviceScopeAuthorizationHandler`'s live
+status/credential-version re-check (the mechanism that makes revocation
+take effect immediately without a token blocklist) only runs for policies
+that carry a `DeviceScopeRequirement` — a bare `RequireAuthenticatedUser()`
+policy would let an already-revoked device keep calling these three routes
+until its token naturally expires. `DeviceScopeRequirement`'s `Scope`
+becomes nullable (`DeviceScopeRequirement(string? scope = null)`), and
+`DeviceScopeAuthorizationHandler` skips the scope-membership check only when
+`Scope` is null, while still performing the live active-status/credential-version
+check unconditionally. `DeviceAuthenticated` adds a scope-less
+`DeviceScopeRequirement()`, so it enforces "currently-active device" with no
+particular capability — reusing the same live-check code path as every
+scoped policy instead of adding a second, divergent one.
+
+`POST /api/sessions/{id}/end` and `POST /api/sessions/{id}/rotate-code` are
+publisher-exclusive session-lifecycle mutations, so they require the
+`session:end` policy rather than the generic `DeviceAuthenticated` one —
+this is also what makes `session:end` (granted only to `windows_publisher`)
+an actually-enforced scope rather than a name that appears on issued tokens
+with no policy checking it.
+
+`CanCreateSession`, `CanJoinSession`, `CanPublishSession`, `CanViewSession`
+are removed — undifferentiated `RequireAuthenticatedUser()` stubs, with
+`CanPublishSession`/`CanViewSession` never referenced by any route.
+`CanRegisterDevice` and `AuthenticatedUser` are **not** removed: grep confirms
+`CanRegisterDevice` still gates `POST /api/devices` in the untouched, old
+owner-scoped `DeviceEndpoints.cs:15`, so removing it would silently break
+that unrelated, out-of-scope feature — exactly the class of mistake Phase 1
+caught once already with `MapDeviceEndpoints()`.
 
 Registration of the `DeviceBearer` scheme and the new session/signaling/TURN
 policies moves **outside** the `if (deviceIdentityEnabled)` block in
@@ -102,11 +124,14 @@ policies and their endpoint mappings remain inside it, unchanged.
   `session:create` already establishes device type).
 - `POST /api/sessions/join` — requires `session:join`; same pattern, viewer
   device.
-- `GET /api/sessions/active`, `GET /api/sessions/{id}`,
-  `POST /api/sessions/{id}/end`, `POST /api/sessions/{id}/rotate-code` —
-  require the `DeviceAuthenticated` policy (see Authorization policies
-  above), with the ownership check rewritten from `OwnerUserId == user.Id`
-  to `SourceDeviceId == callerDeviceId`.
+- `GET /api/sessions/active`, `GET /api/sessions/{id}` — require the
+  `DeviceAuthenticated` policy (see Authorization policies above), with the
+  ownership/participant check rewritten from `OwnerUserId == user.Id` /
+  `UserId == user.Id` to `SourceDeviceId == callerDeviceId` /
+  `DeviceId == callerDeviceId`.
+- `POST /api/sessions/{id}/end`, `POST /api/sessions/{id}/rotate-code` —
+  require the `session:end` policy, with the ownership check rewritten from
+  `OwnerUserId == user.Id` to `SourceDeviceId == callerDeviceId`.
 
 ## WebSocket signaling (`SignalingWebSocketEndpoint.cs`)
 
