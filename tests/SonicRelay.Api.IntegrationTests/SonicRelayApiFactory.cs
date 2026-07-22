@@ -33,6 +33,13 @@ public sealed class SonicRelayApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("RateLimits:CreateSession:PermitLimit", "100");
         builder.UseSetting("RateLimits:JoinSession:PermitLimit", "100");
         builder.UseSetting("RateLimits:RotateCode:PermitLimit", "100");
+        builder.UseSetting("DeviceIdentity:CredentialHmacKey", "integration-test-device-credential-key");
+        builder.UseSetting("DeviceIdentity:PairingCodeHmacKey", "integration-test-pairing-code-key");
+        builder.UseSetting("DeviceIdentity:TokenSigningKey", "integration-test-device-token-signing-key-32bytes-min");
+        builder.UseSetting("RateLimits:DeviceBootstrap:PermitLimit", "100");
+        builder.UseSetting("RateLimits:DeviceToken:PermitLimit", "100");
+        builder.UseSetting("RateLimits:PairingCreate:PermitLimit", "100");
+        builder.UseSetting("RateLimits:PairingComplete:PermitLimit", "100");
         foreach (var setting in _settings)
         {
             builder.UseSetting(setting.Key, setting.Value);

@@ -47,7 +47,7 @@ flowchart TD
 ## Components
 
 - `services/SonicRelay.Api`: Minimal API composition, rate limits, health checks, endpoint handlers, WebSocket signaling and session cleanup.
-- `src/SonicRelay.Domain`: user, device, session, participant and signaling-event models.
+- `src/SonicRelay.Domain`: user, device, session, participant and signaling-event models, and (Phase 1 of issue #26) a parallel device-identity credential and pairing model — see `docs/device-identity.md`. `StreamSession.SourceDeviceId` and `SessionParticipant.DeviceId` now reference `DeviceIdentity` rather than `ApplicationUser`/the old `Device` entity (Phase 2 of issue #26); `Device` is no longer part of the session, signaling or TURN path and remains only for its own unrelated, owner-scoped CRUD feature, pending Phase 4 cleanup.
 - `src/SonicRelay.Application`: abstractions for session-code storage and live connection routing.
 - `src/SonicRelay.Infrastructure`: EF Core/PostgreSQL persistence, Identity stores, Redis session-code storage and the in-memory connection registry.
 - `infra`: development and full-stack production Compose definitions, nginx and coturn configuration.
@@ -76,7 +76,7 @@ sequenceDiagram
     API->>DB: create session + publisher participant
     API->>R: store HMAC-derived code lookup with TTL
     API-->>W: session + temporary code
-    W->>API: GET /ws/signaling?sessionId=...&deviceId=...
+    W->>API: GET /ws/signaling?sessionId=...
 
     F->>API: POST /auth/login
     API-->>F: access token + refresh token
@@ -85,7 +85,7 @@ sequenceDiagram
     API->>R: resolve code
     API->>DB: create viewer participant
     API-->>F: session
-    F->>API: GET /ws/signaling?sessionId=...&deviceId=...
+    F->>API: GET /ws/signaling?sessionId=...
 
     W->>API: webrtc.offer targeted to viewer
     API-->>F: webrtc.offer
@@ -187,3 +187,4 @@ flowchart TD
 - [ADR 0002: Use Identity opaque bearer tokens](adr/0002-identity-bearer-tokens.md)
 - [ADR 0003: Split durable and ephemeral storage](adr/0003-postgresql-and-redis-storage.md)
 - [ADR 0004: Use authenticated WebSocket signaling](adr/0004-authenticated-websocket-signaling.md)
+- [ADR 0005: Symmetric device credentials with a parallel DeviceBearer scheme](adr/0005-device-identity-credentials.md) — extended in Phase 2 to sessions, signaling and TURN credential issuance

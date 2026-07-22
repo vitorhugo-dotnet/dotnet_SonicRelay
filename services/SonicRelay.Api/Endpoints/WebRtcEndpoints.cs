@@ -1,11 +1,10 @@
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Api.Contracts;
 using SonicRelay.Api.Observability;
 using SonicRelay.Api.Services;
-using SonicRelay.Domain.Users;
 using SonicRelay.Infrastructure.Persistence;
 
 namespace SonicRelay.Api.Endpoints;
@@ -14,36 +13,35 @@ public static class WebRtcEndpoints
 {
     public static IEndpointRouteBuilder MapWebRtcEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/api/webrtc").RequireAuthorization().WithTags("WebRTC");
-        group.MapGet("/ice-servers", GetIceServersAsync);
-        group.MapPost("/stats", ReportStatsAsync).WithName("ReportWebRtcStats");
+        var group = app.MapGroup("/api/webrtc").WithTags("WebRTC");
+        group.MapGet("/ice-servers", GetIceServersAsync).RequireAuthorization("turn:credentials");
+        group.MapPost("/stats", ReportStatsAsync).RequireAuthorization("DeviceAuthenticated").WithName("ReportWebRtcStats");
         return app;
     }
 
-    private static async Task<IResult> GetIceServersAsync(System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager, TurnCredentialService credentials)
+    private static async Task<IResult> GetIceServersAsync(ClaimsPrincipal principal, AppDbContext db,
+        TurnCredentialService credentials, CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
-        return Results.Ok(credentials.Build(user.Id.ToString("D")));
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+        return Results.Ok(credentials.Build(device.Id.ToString("D")));
     }
 
     private static async Task<IResult> ReportStatsAsync(
         WebRtcStatsReport report,
-        System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager,
+        ClaimsPrincipal principal,
         AppDbContext db,
         SonicRelayMetrics metrics,
         ILoggerFactory loggerFactory,
         CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
 
-        // Only a participant of the session may report stats for it, so a signed-in user
-        // cannot inject metrics for arbitrary sessions.
+        // Only a participant of the session may report stats for it, so an authenticated
+        // device cannot inject metrics for arbitrary sessions.
         var isParticipant = await db.SessionParticipants.AsNoTracking()
-            .AnyAsync(x => x.SessionId == report.SessionId && x.UserId == user.Id, ct);
+            .AnyAsync(x => x.SessionId == report.SessionId && x.DeviceId == device.Id, ct);
         if (!isParticipant) return Results.Forbid();
 
         var role = report.Role is "publisher" or "viewer" ? report.Role : "unknown";

@@ -1,6 +1,5 @@
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
-using SonicRelay.Domain.Sessions;
 using SonicRelay.Domain.Users;
 using SonicRelay.Infrastructure.Persistence;
 
@@ -28,9 +27,12 @@ public enum AccountDeletionReason
 }
 
 /// <summary>
-/// Soft-deletes SonicRelay accounts: disables login/refresh, revokes devices, ends
-/// active sessions and records an audit trail. Hard deletion is intentionally avoided
-/// so the audit trail and foreign-key integrity survive.
+/// Soft-deletes SonicRelay accounts: disables login/refresh, revokes the user's owned
+/// devices (the old owner-scoped Device entity), and records an audit trail. Hard deletion
+/// is intentionally avoided so the audit trail and foreign-key integrity survive. Does not
+/// touch StreamSessions/SessionParticipants: those are owned by DeviceIdentity, which has
+/// no relationship to ApplicationUser, so account deletion has nothing session-related left
+/// to do since the device-identity migration (issue #26 Phase 2).
 /// </summary>
 public sealed class AccountDeletionService(
     UserManager<ApplicationUser> userManager,
@@ -82,25 +84,14 @@ public sealed class AccountDeletionService(
         }
 
         var now = DateTimeOffset.UtcNow;
-        var activeSessions = await db.StreamSessions
-            .Where(x => x.OwnerUserId == targetUserId
-                && (x.Status == SessionStatuses.Waiting || x.Status == SessionStatuses.Active))
-            .ToListAsync(ct);
-        foreach (var session in activeSessions)
-        {
-            session.Status = SessionStatuses.Ended;
-            session.EndedAt = now;
-        }
-
         await db.SaveChangesAsync(ct);
         var revokedDevices = devices.Count;
-        var endedSessions = activeSessions.Count;
 
         // Structured audit record. Deliberately avoids logging email/PII in the
         // clear beyond the identifiers required to trace an administrative action.
         logger.LogInformation(
-            "Account deletion: target={TargetUserId} requestedBy={RequestedByUserId} reason={Reason} origin={RequestOrigin} revokedDevices={RevokedDevices} endedSessions={EndedSessions}",
-            targetUserId, requestedByUserId, reason, requestOrigin ?? "unknown", revokedDevices, endedSessions);
+            "Account deletion: target={TargetUserId} requestedBy={RequestedByUserId} reason={Reason} origin={RequestOrigin} revokedDevices={RevokedDevices}",
+            targetUserId, requestedByUserId, reason, requestOrigin ?? "unknown", revokedDevices);
 
         await notifier.NotifyAsync(new AccountDeletionNotification(
             targetUserId,

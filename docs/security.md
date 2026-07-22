@@ -14,14 +14,14 @@ This document separates controls present in the current code from work still req
 
 ### Authorization and isolation
 
-- Session creation requires an owned, non-revoked source device.
-- Session reads are limited to owners or participants and return `404` to other users.
-- End and code rotation operations require session ownership.
-- Join requires an owned, non-revoked viewer device and enforces the session viewer limit.
-- WebSocket upgrade requires matching authenticated user, device and session participant records.
+- Session creation requires a `session:create`-scoped `DeviceBearer` token; the caller's own authenticated device is always the session's source device.
+- Session reads (`GET /api/sessions/active`, `GET /api/sessions/{id}`) are limited to sessions where the caller's device is the source or a participant and return `404` otherwise.
+- End and code rotation operations require a `session:end`-scoped token and require the caller's device to be the session's source device.
+- Join requires a `session:join`-scoped token and enforces the session viewer limit; the joining device is always the caller's own, never a client-supplied one.
+- WebSocket upgrade requires a `signaling:connect`-scoped token and a matching session participant record for the caller's device.
 - Signaling routing always uses the authenticated participant as `from` and restricts recipients to the same session.
 
-The named policies `CanRegisterDevice`, `CanCreateSession`, `CanJoinSession`, `CanPublishSession` and `CanViewSession` currently only require authentication; resource-specific ownership, type and revocation checks live in handlers.
+The named policies `session:create`, `session:join`, `session:end`, `signaling:connect` and `turn:credentials` each require a `DeviceBearer` token carrying the matching scope; `DeviceScopeAuthorizationHandler` also re-checks the device's live status and credential version against the database on every request, so revocation and credential rotation take effect immediately. `CanRegisterDevice`, used only by the unrelated, pre-existing owner-scoped `Device` CRUD feature, still just requires authentication.
 
 ### Session codes
 
@@ -33,10 +33,40 @@ The named policies `CanRegisterDevice`, `CanCreateSession`, `CanJoinSession`, `C
 
 Current limitation: successful join lookup does not consume a code. A code can be reused until rotation, session end or expiry.
 
+### Device identity credentials (Phase 1 of issue #26)
+
+- Device bootstrap issues a high-entropy secret once; only its HMAC-SHA-256
+  output, keyed by `DeviceIdentity:CredentialHmacKey`, is persisted.
+- Access tokens are short-lived JWTs on a separate `DeviceBearer` scheme;
+  every scoped request re-checks device status and credential version against
+  the database, so rotation and revocation take effect immediately.
+- Pairing codes follow the session-code convention: HMAC-hashed, short TTL,
+  attempt-limited, and indistinguishable failure responses. `pairing-create`
+  and `pairing-complete` are rate-limited by IP, not by device: per-device
+  keying was evaluated but would require making `DeviceBearer` the app's
+  default authentication scheme, which is out of scope for this phase, so
+  `DeviceIdentity:PairingMaxAttempts` remains the primary defense against
+  pairing-code brute-forcing.
+- The entire flow is gated by `DeviceIdentity:Enabled` and does not affect
+  the existing Identity login endpoints.
+- Sessions, signaling and TURN credential issuance (Phase 2 of issue #26)
+  now authenticate exclusively via `DeviceBearer`; the previous
+  Identity-based, `ApplicationUser`-owned session path no longer exists for
+  these routes. `DeviceScopeAuthorizationHandler`'s live device-status and
+  credential-version check — the same one backing the scoped
+  `session:*`/`signaling:connect`/`turn:credentials` policies above — also
+  protects three read-only routes that need no capability beyond an active
+  device: `GET /api/sessions/active`, `GET /api/sessions/{id}` and
+  `POST /api/webrtc/stats`, via a scope-less `DeviceAuthenticated` policy
+  rather than a capability-scoped one. `DeviceIdentity:Enabled` now only
+  gates the bootstrap/token/rotate-credential/revoke/pairing HTTP surface
+  above; sessions, signaling and TURN have no fallback authentication path
+  and require `DeviceBearer` regardless of the flag.
+
 ### Abuse and data exposure
 
-- Fixed-window limits return `429`: login and refresh are keyed by IP; create, join and rotate are keyed by user ID (falling back to IP).
-- Defaults per 60-second window are login `5`, refresh `5`, create `10`, join `10`, rotate `5`.
+- Fixed-window limits return `429`: login, refresh, device-bootstrap, device-token, pairing-create, pairing-complete, create-session, join-session and rotate-code are all keyed by IP. Create/join/rotate cannot be keyed by device or user: `DeviceBearer` tokens carry no claim a per-caller limiter could key on (see [Device identity credentials](#device-identity-credentials-phase-1-of-issue-26)).
+- Defaults per 60-second window are login `5`, refresh `5`, create `10`, join `10`, rotate `5`, device-bootstrap `10`, device-token `10`, pairing-create `10`, pairing-complete `10`.
 - Signaling frames are limited to 64 KiB text messages.
 - Signaling logs record routing metadata only; SDP and ICE payloads are not logged by the endpoint.
 - Readiness checks include PostgreSQL and Redis; liveness does not expose dependency state.

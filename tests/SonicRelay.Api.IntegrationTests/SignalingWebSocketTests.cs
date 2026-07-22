@@ -1,10 +1,9 @@
-using System.Net;
-using System.Net.Http.Json;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using SonicRelay.Domain.DeviceIdentities;
 using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Infrastructure.Persistence;
@@ -14,7 +13,6 @@ namespace SonicRelay.Api.IntegrationTests;
 
 public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory>
 {
-    private const string Password = "Valid1!Password";
     private readonly SonicRelayApiFactory _factory;
 
     public SignalingWebSocketTests(SonicRelayApiFactory factory) => _factory = factory;
@@ -25,7 +23,7 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         var client = _factory.Server.CreateWebSocketClient();
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
-            new Uri($"ws://localhost/ws/signaling?sessionId={Guid.NewGuid()}&deviceId={Guid.NewGuid()}"),
+            new Uri($"ws://localhost/ws/signaling?sessionId={Guid.NewGuid()}"),
             CancellationToken.None));
 
         Assert.Contains("401", exception.Message);
@@ -57,21 +55,30 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     }
 
     [Fact]
-    public async Task Signaling_rejects_an_invalid_session_or_device()
+    public async Task Signaling_rejects_an_unknown_session()
     {
         var participant = await CreateParticipantAsync("invalid-admission");
         var client = _factory.Server.CreateWebSocketClient();
         client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {participant.AccessToken}";
 
         var missingSession = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
-            new Uri($"ws://localhost/ws/signaling?sessionId={Guid.NewGuid()}&deviceId={participant.DeviceId}"),
+            new Uri($"ws://localhost/ws/signaling?sessionId={Guid.NewGuid()}"),
             CancellationToken.None));
         Assert.Contains("404", missingSession.Message);
+    }
 
-        var missingDevice = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
-            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={Guid.NewGuid()}"),
+    [Fact]
+    public async Task Signaling_rejects_a_device_that_is_not_a_participant_of_the_session()
+    {
+        var publisher = await CreateParticipantAsync("not-a-participant-publisher");
+        var stranger = await CreateParticipantAsync("not-a-participant-stranger");
+        var client = _factory.Server.CreateWebSocketClient();
+        client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {stranger.AccessToken}";
+
+        var forbidden = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
+            new Uri($"ws://localhost/ws/signaling?sessionId={publisher.SessionId}"),
             CancellationToken.None));
-        Assert.Contains("403", missingDevice.Message);
+        Assert.Contains("403", forbidden.Message);
     }
 
     [Fact]
@@ -287,7 +294,7 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {participant.AccessToken}";
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
-            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={participant.DeviceId}"),
+            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}"),
             CancellationToken.None));
 
         Assert.Contains("410", exception.Message);
@@ -316,17 +323,26 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     }
 
     [Fact]
-    public async Task Signaling_rejects_a_revoked_device_before_accepting_the_socket()
+    public async Task Signaling_rejects_reconnecting_with_a_token_from_a_device_revoked_after_the_first_connection()
     {
-        var participant = await CreateParticipantAsync("revoked");
+        var participant = await CreateParticipantAsync("revoked-mid-session");
+        using (var firstSocket = await ConnectAsync(participant))
+        {
+            await ReceiveAsync(firstSocket);
+        }
         await SetDeviceRevokedAsync(participant.DeviceId);
         var client = _factory.Server.CreateWebSocketClient();
         client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {participant.AccessToken}";
 
         var exception = await Assert.ThrowsAsync<InvalidOperationException>(() => client.ConnectAsync(
-            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={participant.DeviceId}"),
+            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}"),
             CancellationToken.None));
 
+        // The token itself still validates (signature/expiry unchanged), so authentication
+        // succeeds; DeviceScopeAuthorizationHandler's live revocation check is what then fails
+        // the "signaling:connect" policy requirement, and ASP.NET Core returns 403 (not 401) for
+        // an authenticated caller that fails an authorization requirement — matching the revoked
+        // publisher HTTP case in SessionEndpointsTests.
         Assert.Contains("403", exception.Message);
     }
 
@@ -334,33 +350,17 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     {
         factory ??= _factory;
         var http = factory.CreateClient();
-        var email = $"ws-{prefix}-{Guid.NewGuid():N}@example.com";
-        var register = await http.PostAsJsonAsync("/auth/register", new { email, password = Password });
-        Assert.Equal(HttpStatusCode.OK, register.StatusCode);
-        var login = await http.PostAsJsonAsync("/auth/login", new { email, password = Password });
-        var tokens = await ReadJsonAsync(login);
-        var accessToken = tokens.GetProperty("accessToken").GetString()!;
+        var session = await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(
+            http, DeviceTypes.WindowsPublisher, DevicePlatforms.Windows, $"{prefix} device");
 
-        var userId = await GetUserIdAsync(email, factory);
-        var deviceId = Guid.NewGuid();
         var sessionId = Guid.NewGuid();
         var participantId = Guid.NewGuid();
         await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        db.Devices.Add(new Device
-        {
-            Id = deviceId,
-            OwnerUserId = userId,
-            Name = $"{prefix} device",
-            Type = DeviceTypes.WindowsPublisher,
-            Platform = DevicePlatforms.Windows,
-            CreatedAt = DateTimeOffset.UtcNow
-        });
         db.StreamSessions.Add(new StreamSession
         {
             Id = sessionId,
-            OwnerUserId = userId,
-            SourceDeviceId = deviceId,
+            SourceDeviceId = session.DeviceId,
             Status = SessionStatuses.Active,
             MaxViewers = 1,
             CodeExpiresAt = DateTimeOffset.UtcNow.AddMinutes(5),
@@ -370,24 +370,13 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         {
             Id = participantId,
             SessionId = sessionId,
-            UserId = userId,
-            DeviceId = deviceId,
+            DeviceId = session.DeviceId,
             Role = ParticipantRoles.Publisher,
             Status = ParticipantStatuses.Connected,
             JoinedAt = DateTimeOffset.UtcNow
         });
         await db.SaveChangesAsync();
-        return new TestParticipant(accessToken, sessionId, deviceId, participantId);
-    }
-
-    private async Task<Guid> GetUserIdAsync(string email, SonicRelayApiFactory? factory = null)
-    {
-        factory ??= _factory;
-        await using var scope = factory.Services.CreateAsyncScope();
-        return await scope.ServiceProvider.GetRequiredService<AppDbContext>().Users
-            .Where(x => x.Email == email)
-            .Select(x => x.Id)
-            .SingleAsync();
+        return new TestParticipant(session.AccessToken, sessionId, session.DeviceId, participantId);
     }
 
     private async Task<TestParticipant> CreateViewerAsync(TestParticipant publisher, string prefix,
@@ -395,39 +384,23 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     {
         factory ??= _factory;
         var http = factory.CreateClient();
-        var email = $"ws-{prefix}-{Guid.NewGuid():N}@example.com";
-        var register = await http.PostAsJsonAsync("/auth/register", new { email, password = Password });
-        Assert.Equal(HttpStatusCode.OK, register.StatusCode);
-        var login = await http.PostAsJsonAsync("/auth/login", new { email, password = Password });
-        var tokens = await ReadJsonAsync(login);
-        var accessToken = tokens.GetProperty("accessToken").GetString()!;
+        var session = await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(
+            http, DeviceTypes.FlutterViewer, DevicePlatforms.Android, $"{prefix} device");
 
-        var userId = await GetUserIdAsync(email, factory);
-        var deviceId = Guid.NewGuid();
         var participantId = Guid.NewGuid();
         await using var scope = factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        db.Devices.Add(new Device
-        {
-            Id = deviceId,
-            OwnerUserId = userId,
-            Name = $"{prefix} device",
-            Type = DeviceTypes.FlutterViewer,
-            Platform = DevicePlatforms.Android,
-            CreatedAt = DateTimeOffset.UtcNow
-        });
         db.SessionParticipants.Add(new SessionParticipant
         {
             Id = participantId,
             SessionId = publisher.SessionId,
-            UserId = userId,
-            DeviceId = deviceId,
+            DeviceId = session.DeviceId,
             Role = ParticipantRoles.Viewer,
             Status = ParticipantStatuses.Connected,
             JoinedAt = DateTimeOffset.UtcNow
         });
         await db.SaveChangesAsync();
-        return new TestParticipant(accessToken, publisher.SessionId, deviceId, participantId);
+        return new TestParticipant(session.AccessToken, publisher.SessionId, session.DeviceId, participantId);
     }
 
     private async Task<WebSocket> ConnectAsync(TestParticipant participant, SonicRelayApiFactory? factory = null)
@@ -436,7 +409,7 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         client.ConfigureRequest = request =>
             request.Headers.Authorization = $"Bearer {participant.AccessToken}";
         return await client.ConnectAsync(
-            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}&deviceId={participant.DeviceId}"),
+            new Uri($"ws://localhost/ws/signaling?sessionId={participant.SessionId}"),
             CancellationToken.None);
     }
 
@@ -454,8 +427,8 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     {
         await using var scope = _factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        var device = await db.Devices.SingleAsync(x => x.Id == deviceId);
-        device.Revoked = true;
+        var device = await db.DeviceIdentities.SingleAsync(x => x.Id == deviceId);
+        device.Status = DeviceIdentityStatuses.Revoked;
         await db.SaveChangesAsync();
     }
 
@@ -488,12 +461,6 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
         var result = await socket.ReceiveAsync(buffer, ct);
         Assert.Equal(WebSocketMessageType.Text, result.MessageType);
         using var document = JsonDocument.Parse(buffer.AsMemory(0, result.Count));
-        return document.RootElement.Clone();
-    }
-
-    private static async Task<JsonElement> ReadJsonAsync(HttpResponseMessage response)
-    {
-        using var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
         return document.RootElement.Clone();
     }
 

@@ -133,21 +133,6 @@ public sealed class DeviceEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
-    public async Task Registered_publisher_can_create_a_session_without_database_seeding()
-    {
-        var user = await CreateUserAsync("session-flow");
-        var deviceId = await CreateDeviceAsync(user.Client, "Publisher", "windows_publisher", "windows");
-
-        var session = await user.Client.PostAsJsonAsync("/api/sessions", new
-        {
-            sourceDeviceId = deviceId,
-            maxViewers = 2
-        });
-
-        Assert.Equal(HttpStatusCode.Created, session.StatusCode);
-    }
-
-    [Fact]
     public async Task All_device_routes_reject_anonymous_requests()
     {
         var client = _factory.CreateClient();

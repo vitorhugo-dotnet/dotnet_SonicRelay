@@ -4,7 +4,6 @@ public sealed record ConnectionDescriptor(
     string ConnectionId,
     Guid SessionId,
     Guid ParticipantId,
-    Guid UserId,
     Guid DeviceId,
     string Role,
     DateTimeOffset ConnectedAt,

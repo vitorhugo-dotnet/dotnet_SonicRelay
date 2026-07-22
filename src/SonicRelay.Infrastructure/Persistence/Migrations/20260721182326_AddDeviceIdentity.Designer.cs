@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using SonicRelay.Infrastructure.Persistence;
@@ -11,9 +12,11 @@ using SonicRelay.Infrastructure.Persistence;
 namespace SonicRelay.Infrastructure.Persistence.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    partial class AppDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260721182326_AddDeviceIdentity")]
+    partial class AddDeviceIdentity
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -361,6 +364,9 @@ namespace SonicRelay.Infrastructure.Persistence.Migrations
                         .HasMaxLength(32)
                         .HasColumnType("character varying(32)");
 
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid");
+
                     b.HasKey("Id");
 
                     b.HasIndex("SessionId", "Role")
@@ -387,6 +393,9 @@ namespace SonicRelay.Infrastructure.Persistence.Migrations
                     b.Property<int>("MaxViewers")
                         .HasColumnType("integer");
 
+                    b.Property<Guid>("OwnerUserId")
+                        .HasColumnType("uuid");
+
                     b.Property<Guid>("SourceDeviceId")
                         .HasColumnType("uuid");
 
@@ -399,6 +408,9 @@ namespace SonicRelay.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(32)");
 
                     b.HasKey("Id");
+
+                    b.HasIndex("OwnerUserId", "Status")
+                        .HasDatabaseName("ix_stream_sessions_owner_status");
 
                     b.HasIndex("SourceDeviceId", "Status")
                         .HasDatabaseName("ix_stream_sessions_source_device_status");

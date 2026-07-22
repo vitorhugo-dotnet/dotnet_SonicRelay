@@ -70,6 +70,21 @@ dotnet test tests/SonicRelay.Api.IntegrationTests/SonicRelay.Api.IntegrationTest
 
 Validate the real authentication, device, session, and WebSocket signaling flow without audio or WebRTC clients using the [fake signaling client](tools/SonicRelay.SignalingClient/README.md).
 
+## Configuration
+
+Set the following high-entropy secrets in production deployments (outside Git):
+
+| Secret | Purpose |
+| --- | --- |
+| `Sessions:CodeHmacKey` | Server-side pepper for hashing session join codes. |
+| `DeviceIdentity:CredentialHmacKey` | Server-side pepper for hashing device credential secrets. |
+| `DeviceIdentity:PairingCodeHmacKey` | Server-side pepper for hashing pairing codes. |
+| `DeviceIdentity:TokenSigningKey` | Symmetric signing key for `DeviceBearer` JWTs. |
+
+See [device identity configuration](docs/device-identity.md#configuration) for details on the `DeviceIdentity:*` keys.
+
+`DeviceIdentity:TokenSigningKey` (and the other `DeviceIdentity:*` keys above) are effectively required in any real deployment now: sessions, signaling and TURN credential issuance authenticate exclusively via `DeviceBearer` and have no fallback authentication path, so `DeviceIdentity:Enabled=false` no longer provides a way to run the product without configuring them — it only removes the bootstrap/token/rotate-credential/revoke/pairing HTTP surface.
+
 ## Documentation
 
 - [Architecture](docs/architecture.md)
