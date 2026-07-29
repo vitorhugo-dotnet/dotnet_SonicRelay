@@ -4,6 +4,7 @@ using System.Text;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Application.Abstractions;
+using SonicRelay.Domain.DeviceIdentities;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Infrastructure.Persistence;
 
@@ -190,6 +191,9 @@ public static class SessionEndpoints
             return Results.Ok(ToResponse(session));
         }
 
+        if (!await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
+            return InvalidCode();
+
         // Viewers mid-reconnect-grace-period still hold their slot, otherwise a new viewer
         // could take it during the grace window and leave a maxViewers=1 session with two
         // viewers once the original one's WebSocket reconnects.
@@ -221,6 +225,13 @@ public static class SessionEndpoints
     }
 
     private static IResult InvalidCode() => Results.NotFound(new { error = "Invalid or expired session code." });
+
+    private static Task<bool> HasActivePairingAsync(AppDbContext db,
+        Guid publisherId, Guid viewerId, CancellationToken ct) =>
+        db.DevicePairings.AsNoTracking().AnyAsync(x =>
+            x.PublisherDeviceId == publisherId
+            && x.ViewerDeviceId == viewerId
+            && x.Status == DevicePairingStatuses.Active, ct);
 
     private static object ToResponse(StreamSession session, string? code = null) => new
     {
