@@ -57,7 +57,9 @@ The signaling registry is process-local. Multiple API replicas do not share live
 
 ## Primary flow
 
-Device endpoints persist owner-scoped Windows Publisher and Flutter Viewer records. Session creation and join validate those devices before admitting participants.
+The current desktop/mobile flow uses durable device credentials and pairing.
+Identity/account endpoints remain a separate, legacy owner-scoped feature pending
+Phase 4 cleanup; they are not used for sessions, signaling, or TURN.
 
 ```mermaid
 sequenceDiagram
@@ -69,21 +71,27 @@ sequenceDiagram
     participant F as Flutter Viewer
     participant TURN as coturn
 
-    W->>API: POST /auth/login
-    API-->>W: access token + refresh token
-    W->>API: register Windows Publisher device
+    W->>API: POST /api/devices/bootstrap (windows_publisher)
+    API-->>W: device ID + one-time credential secret
+    W->>API: POST /api/devices/token
+    API-->>W: short-lived DeviceBearer
+    W->>API: POST /api/pairings/challenges
+    API-->>W: pairing code / QR payload
     W->>API: POST /api/sessions
     API->>DB: create session + publisher participant
     API->>R: store HMAC-derived code lookup with TTL
     API-->>W: session + temporary code
     W->>API: GET /ws/signaling?sessionId=...
 
-    F->>API: POST /auth/login
-    API-->>F: access token + refresh token
-    F->>API: register Flutter Viewer device
+    F->>API: POST /api/devices/bootstrap (flutter_viewer)
+    API-->>F: device ID + one-time credential secret
+    F->>API: POST /api/devices/token
+    API-->>F: short-lived DeviceBearer
+    F->>API: POST /api/pairings/complete (pairing code)
+    API->>DB: create active DevicePairing
     F->>API: POST /api/sessions/join
     API->>R: resolve code
-    API->>DB: create viewer participant
+    API->>DB: verify active pairing; create viewer participant
     API-->>F: session
     F->>API: GET /ws/signaling?sessionId=...
 

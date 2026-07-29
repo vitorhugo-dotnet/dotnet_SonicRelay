@@ -1,6 +1,9 @@
 # HTTP and WebSocket protocol
 
-This document describes routes mapped by the current API. Unless marked public, HTTP requests require `Authorization: Bearer <opaque-access-token>`.
+This document describes routes mapped by the current API. Desktop/mobile client
+flows for sessions, signaling and TURN use `Authorization: Bearer
+<DeviceBearer-token>`. ASP.NET Core Identity tokens remain only for retained
+legacy/account endpoints pending Phase 4 cleanup.
 
 ## Health
 
@@ -13,6 +16,17 @@ Swagger is enabled by default only in Development, or when `Swagger:Enabled=true
 
 ## Authentication
 
+### Device identity (current desktop/mobile flow)
+
+Bootstrap a publisher or viewer with `POST /api/devices/bootstrap`, then
+exchange its device ID and one-time credential secret at `POST
+/api/devices/token` for a short-lived `DeviceBearer` JWT. Use that token for
+sessions, WebSocket signaling and TURN credentials. Before a viewer joins a
+publisher's session, the two devices establish a durable pairing through
+`POST /api/pairings/challenges` and `POST /api/pairings/complete`.
+
+### Identity (retained legacy/account endpoints)
+
 `MapIdentityApi<ApplicationUser>` maps the standard ASP.NET Core Identity API under `/auth`: `/register`, `/login`, `/refresh`, `/confirmEmail`, `/resendConfirmationEmail`, `/forgotPassword`, `/resetPassword`, `/manage/2fa` and `/manage/info`. The framework owns their request/response contracts. This project additionally maps:
 
 | Method | Route | Auth | Behavior |
@@ -20,7 +34,10 @@ Swagger is enabled by default only in Development, or when `Swagger:Enabled=true
 | `POST` | `/auth/logout` | Required | Returns `204`; it does not revoke already issued self-contained bearer tokens. |
 | `GET` | `/auth/me` | Required | Returns `id`, `email`, `displayName`, `emailConfirmed`, `createdAt` and `lastLoginAt`. |
 
-For desktop/mobile login, omit cookies or use `POST /auth/login?useCookies=false`. The response contains an opaque bearer access token, expiry and refresh token; it is not a JWT.
+These Identity routes are retained for legacy/account management pending Phase 4;
+desktop/mobile clients must not use them for sessions, signaling, TURN, or
+device pairing. The legacy login response contains an opaque bearer access
+token, expiry and refresh token; it is not a JWT.
 
 ```json
 {
@@ -252,11 +269,11 @@ Configure STUN e TURN/coturn nos clients ao criar a peer connection. Essas crede
 
 ### O que o backend valida
 
-- token de acesso e upgrade WebSocket;
-- formato UUID de `sessionId` e `deviceId`;
+- token `DeviceBearer` e upgrade WebSocket;
+- formato UUID de `sessionId` (o único parâmetro de consulta do signaling);
 - existência e estado/validade temporal da sessão;
-- propriedade, tipo esperado e revogação do device;
-- participação do usuário/device na sessão;
+- status e versão de credencial do device autenticado pelo token;
+- participação do device autenticado na sessão;
 - JSON válido, `type` permitido, limite de 64 KiB e frame textual;
 - presença/formato de `to` e pertencimento do destinatário à mesma sessão;
 - identidade do remetente, derivada do socket autenticado.
@@ -274,7 +291,10 @@ Esse limite é deliberado: o backend coordena peers e trata `payload` como JSON 
 ### Notas de segurança para clients
 
 - Use apenas HTTPS/WSS em produção e valide o certificado do servidor.
-- Armazene access/refresh tokens no armazenamento seguro da plataforma e nunca em logs.
+- Armazene o segredo de credencial persistente do device e os tokens
+  `DeviceBearer` de curta duração no armazenamento seguro da plataforma e
+  nunca em logs. Tokens Identity de acesso/refresh são apenas do fluxo
+  legado/account.
 - Não registre SDP, ICE candidates, tokens, códigos de sessão nem credenciais TURN; SDP/ICE podem revelar dados de rede e mídia.
 - Aceite mensagens somente pelo socket autenticado e para a sessão/participante esperado, mesmo com a normalização do servidor.
 - Trate `error`, `session.left`, `session.ended`, fechamento do socket e expiração como estados normais e limpe recursos.

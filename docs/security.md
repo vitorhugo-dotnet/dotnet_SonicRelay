@@ -7,10 +7,10 @@ This document separates controls present in the current code from work still req
 ### Identity and tokens
 
 - ASP.NET Core Identity stores users and roles in PostgreSQL and requires unique email addresses.
-- Desktop/mobile clients use opaque Identity bearer and refresh tokens. Defaults are 15 minutes and 30 days, configurable through `Auth:AccessTokenMinutes` and `Auth:RefreshTokenDays`.
+- Desktop/mobile clients bootstrap a device once and exchange its persistent credential for a short-lived `DeviceBearer` JWT (default 5 minutes). Sessions, signaling, TURN and pairing use this device-identity flow; opaque Identity bearer/refresh tokens are retained only for legacy/account endpoints pending Phase 4.
 - Protected API groups and the WebSocket endpoint require authentication.
 - Account/email confirmation is not required by the current Identity configuration.
-- `/auth/logout` returns success but does not maintain a token revocation list; clients must delete local tokens.
+- The retained legacy `/auth/logout` returns success but does not maintain a token revocation list; legacy/account clients must delete their local Identity tokens.
 
 ### Authorization and isolation
 
