@@ -29,6 +29,13 @@ This repository contains only the backend and its infrastructure.
 
 See the [client integration protocol](docs/protocol.md) for exact routes and WebRTC signaling flows, the [beginner guide](docs/beginner-guide.md) for a plain-language introduction, and [Security](docs/security.md) for implemented controls and known gaps.
 
+### Pairing authorization
+
+A new viewer participant needs both an active DevicePairing to the session's
+source device and the current session join code. The API deliberately returns
+the invalid/expired-code response when either condition is absent. Existing
+participants may reconnect after pairing revocation until the session ends.
+
 ## Quick start
 
 Requirements: .NET 10 SDK, PostgreSQL and Redis.

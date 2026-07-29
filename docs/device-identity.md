@@ -104,6 +104,13 @@ claim a per-device or per-user limiter could key on without making
 `DeviceBearer` the app's default authentication scheme, which remains out of
 scope.
 
+## Pairing authorization (Phase 3)
+
+A new viewer participant needs both an active DevicePairing to the session's
+source device and the current session join code. The API deliberately returns
+the invalid/expired-code response when either condition is absent. Existing
+participants may reconnect after pairing revocation until the session ends.
+
 ## Out of scope in Phase 1
 
 `ApplicationUser` and the existing owner-scoped `Device` entity are

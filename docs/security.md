@@ -21,6 +21,11 @@ This document separates controls present in the current code from work still req
 - WebSocket upgrade requires a `signaling:connect`-scoped token and a matching session participant record for the caller's device.
 - Signaling routing always uses the authenticated participant as `from` and restricts recipients to the same session.
 
+A new viewer participant needs both an active DevicePairing to the session's
+source device and the current session join code. The API deliberately returns
+the invalid/expired-code response when either condition is absent. Existing
+participants may reconnect after pairing revocation until the session ends.
+
 The named policies `session:create`, `session:join`, `session:end`, `signaling:connect` and `turn:credentials` each require a `DeviceBearer` token carrying the matching scope; `DeviceScopeAuthorizationHandler` also re-checks the device's live status and credential version against the database on every request, so revocation and credential rotation take effect immediately. `CanRegisterDevice`, used only by the unrelated, pre-existing owner-scoped `Device` CRUD feature, still just requires authentication.
 
 ### Session codes
