@@ -22,11 +22,13 @@
 ### Task 1: Specify pairing-gated join behavior
 
 **Files:**
+- Modify: `services/SonicRelay.Api/Endpoints/SessionEndpoints.cs`
 - Modify: `tests/SonicRelay.Api.IntegrationTests/SessionEndpointsTests.cs`
 
 **Interfaces:**
 - Consumes: `DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync`, `DevicePairing`, `AppDbContext`.
 - Produces: `PairDevicesAsync(Guid publisherId, Guid viewerId, string status)` test helper.
+- Produces: `HasActivePairingAsync(AppDbContext, Guid, Guid, CancellationToken)` production helper.
 
 - [ ] **Step 1: Add the pairing seed helper and RED tests**
 
@@ -74,23 +76,7 @@ dotnet test tests/SonicRelay.Api.IntegrationTests/SonicRelay.Api.IntegrationTest
 Expected: the unpaired, revoked, and wrong-publisher tests fail because the
 current handler accepts any viewer holding a valid session code.
 
-- [ ] **Step 3: Commit the RED tests**
-
-```powershell
-git add tests/SonicRelay.Api.IntegrationTests/SessionEndpointsTests.cs
-git commit -m "test(api): require device pairing for session join"
-```
-
-### Task 2: Enforce pairing for new participants
-
-**Files:**
-- Modify: `services/SonicRelay.Api/Endpoints/SessionEndpoints.cs`
-
-**Interfaces:**
-- Consumes: `DevicePairingStatuses.Active`, `StreamSession.SourceDeviceId`, viewer `DeviceIdentity.Id`.
-- Produces: `HasActivePairingAsync(AppDbContext, Guid, Guid, CancellationToken)`.
-
-- [ ] **Step 1: Add the minimal query**
+- [ ] **Step 3: Add the minimal active-pairing query**
 
 ```csharp
 private static Task<bool> HasActivePairingAsync(AppDbContext db,
@@ -103,7 +89,7 @@ private static Task<bool> HasActivePairingAsync(AppDbContext db,
 
 Add `using SonicRelay.Domain.DeviceIdentities;`.
 
-- [ ] **Step 2: Check after existing-participant reconnection and before capacity mutation**
+- [ ] **Step 4: Check after existing-participant reconnection and before capacity mutation**
 
 ```csharp
 if (existing is not null)
@@ -118,13 +104,13 @@ if (!await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
 Do not check pairing during WebSocket reconnect or session reads. Do not
 return `403`, `409`, or pairing-specific copy.
 
-- [ ] **Step 3: Run session tests and verify GREEN**
+- [ ] **Step 5: Run session tests and verify GREEN**
 
 ```powershell
 dotnet test tests/SonicRelay.Api.IntegrationTests/SonicRelay.Api.IntegrationTests.csproj --filter "FullyQualifiedName~SessionEndpointsTests" --no-restore --verbosity minimal
 ```
 
-- [ ] **Step 4: Run adjacent pairing tests**
+- [ ] **Step 6: Run adjacent pairing tests**
 
 ```powershell
 dotnet test tests/SonicRelay.Api.IntegrationTests/SonicRelay.Api.IntegrationTests.csproj --filter "FullyQualifiedName~PairingChallengeTests|FullyQualifiedName~PairingManagementTests" --no-restore --verbosity minimal
@@ -132,14 +118,14 @@ dotnet test tests/SonicRelay.Api.IntegrationTests/SonicRelay.Api.IntegrationTest
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit GREEN**
+- [ ] **Step 7: Commit the green increment**
 
 ```powershell
-git add services/SonicRelay.Api/Endpoints/SessionEndpoints.cs
+git add services/SonicRelay.Api/Endpoints/SessionEndpoints.cs tests/SonicRelay.Api.IntegrationTests/SessionEndpointsTests.cs
 git commit -m "feat(api): require active pairing for session join"
 ```
 
-### Task 3: Document the authorization contract
+### Task 2: Document the authorization contract
 
 **Files:**
 - Modify: `docs/device-identity.md`
