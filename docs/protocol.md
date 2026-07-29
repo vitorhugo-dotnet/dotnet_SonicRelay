@@ -50,21 +50,21 @@ Valid pairs are `windows_publisher`/`windows` and `flutter_viewer`/`android|ios`
 
 ## Sessions
 
-All session routes require authentication.
+All session routes require an active `DeviceBearer` token; capability-changing routes also require their matching device scope.
 
 | Method | Route | Behavior |
 | --- | --- | --- |
-| `POST` | `/api/sessions/` | Creates a waiting session and publisher participant for an owned, non-revoked source device; returns `201` and a six-character code. |
-| `GET` | `/api/sessions/active` | Lists waiting/active sessions owned by or joined by the caller, including connected viewer count. |
-| `GET` | `/api/sessions/{sessionId}` | Returns a session to its owner or participant; inaccessible sessions return `404`. |
-| `POST` | `/api/sessions/{sessionId}/end` | Owner-only; marks the session ended, disconnects participants and removes the Redis code. Idempotently returns the ended session. |
-| `POST` | `/api/sessions/{sessionId}/rotate-code` | Owner-only; rejects ended/expired sessions with `409`, invalidates the previous code and returns a new code. |
-| `POST` | `/api/sessions/join` | Resolves a valid code and owned viewer device, enforces the viewer limit, creates/reconnects a participant and activates a waiting session. |
+| `POST` | `/api/sessions/` | Creates a waiting session and publisher participant for the authenticated publisher device; returns `201` and a six-character code. |
+| `GET` | `/api/sessions/active` | Lists waiting/active sessions where the caller's authenticated device is the source or a participant, including connected viewer count. |
+| `GET` | `/api/sessions/{sessionId}` | Returns a session to its source device or a participant; inaccessible sessions return `404`. |
+| `POST` | `/api/sessions/{sessionId}/end` | Source-device-only; marks the session ended, disconnects participants and removes the Redis code. Idempotently returns the ended session. |
+| `POST` | `/api/sessions/{sessionId}/rotate-code` | Source-device-only; rejects ended/expired sessions with `409`, invalidates the previous code and returns a new code. |
+| `POST` | `/api/sessions/join` | Resolves a valid code for the authenticated viewer device, enforces the viewer limit, creates/reconnects a participant and activates a waiting session. A new participant also requires an active pairing to the session source device. |
 
 Create request:
 
 ```json
-{ "sourceDeviceId": "<uuid>", "maxViewers": 3 }
+{ "maxViewers": 3 }
 ```
 
 `maxViewers` defaults to `Sessions:MaxViewersPerSession` and must be at least one. There is currently no upper bound.
@@ -72,12 +72,12 @@ Create request:
 Join request:
 
 ```json
-{ "code": "ABC123", "deviceId": "<uuid>" }
+{ "code": "ABC123" }
 ```
 
-Codes are trimmed, uppercased and must contain exactly six ASCII letters/digits. Wrong, malformed, expired and terminal-session codes all return `404` with the same error. Despite the store method name `RedeemAsync`, a successful lookup does not consume the code; it remains reusable until rotation, session end or expiry.
+Codes are trimmed, uppercased and must contain exactly six ASCII letters/digits. A new viewer participant needs both an active DevicePairing to the session's source device and the current session join code. Wrong, malformed, expired and terminal-session codes, as well as a missing/revoked pairing for a new participant, all return the same `404` invalid/expired-code response. Existing participants may reconnect after pairing revocation until the session ends. Despite the store method name `RedeemAsync`, a successful lookup does not consume a code; it remains reusable until rotation, session end or expiry.
 
-Session responses contain `id`, `ownerUserId`, `sourceDeviceId`, `status`, `maxViewers`, `codeExpiresAt`, `startedAt`, `endedAt`, `createdAt`, and `code` when a new code is issued.
+Session responses contain `id`, `sourceDeviceId`, `status`, `maxViewers`, `codeExpiresAt`, `startedAt`, `endedAt`, `createdAt`, and `code` when a new code is issued.
 
 ## WebSocket signaling
 
@@ -97,7 +97,7 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 
 1. Autentique pela API e registre um device `windows_publisher`/`windows`.
 2. Crie uma sessão com `POST /api/sessions/` e exiba o código temporário ao usuário.
-3. Abra o WebSocket autenticado usando `sessionId` e o ID do device Publisher.
+3. Abra o WebSocket autenticado usando apenas `sessionId`; a identidade do Publisher vem do token `DeviceBearer`.
 4. Guarde seu `participantId` recebido em `session.joined`. Quando outro `session.joined` anunciar um Viewer, use o `participantId` do payload como destino de `publisher.ready`.
 5. Para cada Viewer, crie uma `RTCPeerConnection`, adicione a faixa de áudio Opus e envie uma `webrtc.offer` direcionada ao `participantId` dele.
 6. Ao receber `webrtc.answer`, aplique o SDP como remote description na conexão daquele Viewer.
@@ -107,7 +107,7 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 ### Fluxo do Viewer
 
 1. Autentique pela API, registre um device `flutter_viewer` para `android` ou `ios` e entre com `POST /api/sessions/join`.
-2. Abra o WebSocket autenticado usando os `sessionId` e `deviceId` retornados/registrados.
+2. Abra o WebSocket autenticado usando apenas `sessionId`; a identidade do Viewer vem do token `DeviceBearer`.
 3. Guarde seu `participantId` recebido em `session.joined`. Ao receber `publisher.ready`, aprenda o ID do Publisher pelo campo autenticado `from` e responda com `viewer.ready` para esse destino.
 4. Ao receber `webrtc.offer`, crie/configure a `RTCPeerConnection` e aplique o SDP como remote description.
 5. Gere a answer, aplique-a localmente e envie `webrtc.answer` ao Publisher.
@@ -119,16 +119,16 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 Connect with an authenticated WebSocket upgrade:
 
 ```text
-GET /ws/signaling?sessionId={uuid}&deviceId={uuid}
-Authorization: Bearer <opaque-access-token>
+GET /ws/signaling?sessionId={uuid}
+Authorization: Bearer <DeviceBearer-token>
 ```
 
 Before upgrade, the API verifies:
 
-- both query parameters are UUIDs;
+- the `sessionId` query parameter is a UUID;
 - the session exists and is not ended, expired or past `codeExpiresAt`;
-- the device belongs to the authenticated user and is not revoked;
-- a participant matches the session, user and device.
+- the `DeviceBearer` token is valid and has the required signaling scope;
+- the authenticated device is active and a participant matches that device and session.
 
 Validation failures return HTTP `400`, `401`, `403`, `404` or `410` before the upgrade. Every server frame uses this envelope:
 
