@@ -110,11 +110,12 @@ dotnet test tests/SonicRelay.Windows.ApiClient.Tests/SonicRelay.Windows.ApiClien
 - [ ] **Step 3: Implement explicit contracts and serialization**
 
 ```csharp
-public sealed record BootstrapDeviceRequest(string Name, string Type, string Platform);
+public sealed record BootstrapDeviceRequest(string Name, string DeviceType, string Platform);
 public sealed record BootstrapDeviceResponse(Guid DeviceId,
     string CredentialSecret, int CredentialVersion);
 public sealed record DeviceTokenRequest(Guid DeviceId, string CredentialSecret);
-public sealed record DeviceTokenResponse(string AccessToken, int ExpiresIn);
+public sealed record DeviceTokenResponse(string AccessToken, DateTimeOffset ExpiresAt,
+    IReadOnlyList<string> Scopes);
 ```
 
 Use `SemaphoreSlim` around load/bootstrap/exchange. Persist the credential
