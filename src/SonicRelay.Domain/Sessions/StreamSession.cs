@@ -3,7 +3,6 @@ namespace SonicRelay.Domain.Sessions;
 public sealed class StreamSession
 {
     public Guid Id { get; set; }
-    public Guid OwnerUserId { get; set; }
     public Guid SourceDeviceId { get; set; }
     public string Status { get; set; } = SessionStatuses.Waiting;
     public int MaxViewers { get; set; }
@@ -17,7 +16,6 @@ public sealed class SessionParticipant
 {
     public Guid Id { get; set; }
     public Guid SessionId { get; set; }
-    public Guid UserId { get; set; }
     public Guid DeviceId { get; set; }
     public string Role { get; set; } = ParticipantRoles.Viewer;
     public string? ConnectionId { get; set; }

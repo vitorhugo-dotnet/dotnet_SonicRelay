@@ -1,5 +1,4 @@
 using System.Net;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
@@ -7,7 +6,6 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using SonicRelay.Api.Services;
-using SonicRelay.Application.Abstractions;
 using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Infrastructure.Persistence;
@@ -17,79 +15,96 @@ namespace SonicRelay.Api.IntegrationTests;
 
 public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
 {
-    private const string Password = "Valid1!Password";
     private readonly SonicRelayApiFactory _factory;
 
     public SessionEndpointsTests(SonicRelayApiFactory factory) => _factory = factory;
 
     [Fact]
-    public async Task Create_requires_an_owned_non_revoked_device_and_adds_publisher()
+    public async Task Create_from_a_publisher_device_creates_a_session_and_adds_it_as_publisher()
     {
-        var owner = await CreateUserAsync("create-owner");
-        var source = await AddDeviceAsync(owner.UserId, revoked: false, DeviceTypes.WindowsPublisher);
+        var (client, deviceId) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
 
-        var response = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = source, maxViewers = 2 });
+        var response = await client.PostAsJsonAsync("/api/sessions", new { maxViewers = 2 });
         var body = await ReadJsonAsync(response);
 
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         Assert.Matches("^[A-Z0-9]{6}$", body.GetProperty("code").GetString()!);
+        Assert.Equal(deviceId, body.GetProperty("sourceDeviceId").GetGuid());
         var sessionId = body.GetProperty("id").GetGuid();
         await using var scope = _factory.Services.CreateAsyncScope();
         var participant = await scope.ServiceProvider.GetRequiredService<AppDbContext>().SessionParticipants.SingleAsync(x => x.SessionId == sessionId);
         Assert.Equal(ParticipantRoles.Publisher, participant.Role);
-        Assert.Equal(source, participant.DeviceId);
-
-        var other = await CreateUserAsync("create-other");
-        var foreign = await other.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = source, maxViewers = 2 });
-        Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
-
-        var revoked = await AddDeviceAsync(owner.UserId, revoked: true, DeviceTypes.WindowsPublisher);
-        var revokedResponse = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = revoked, maxViewers = 2 });
-        Assert.Equal(HttpStatusCode.Forbidden, revokedResponse.StatusCode);
-
-        var viewerDevice = await AddDeviceAsync(owner.UserId, revoked: false, DeviceTypes.FlutterViewer);
-        var wrongType = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = viewerDevice, maxViewers = 2 });
-        Assert.Equal(HttpStatusCode.Forbidden, wrongType.StatusCode);
+        Assert.Equal(deviceId, participant.DeviceId);
     }
 
     [Fact]
-    public async Task Join_validates_viewer_ownership_and_adds_viewer()
+    public async Task Create_rejects_a_viewer_device_that_lacks_the_session_create_scope()
     {
-        var (owner, sessionId, code) = await CreateSessionAsync("join-owner", 2);
-        var viewer = await CreateUserAsync("join-viewer");
-        var viewerDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer);
+        var (client, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
 
-        var response = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = viewerDevice });
+        var response = await client.PostAsJsonAsync("/api/sessions", new { maxViewers = 2 });
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Create_rejects_a_revoked_publisher_device_even_with_a_still_unexpired_token()
+    {
+        var (client, deviceId) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
+        await RevokeDeviceAsync(deviceId);
+
+        var response = await client.PostAsJsonAsync("/api/sessions", new { maxViewers = 2 });
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_from_a_viewer_device_validates_the_code_and_adds_it_as_viewer()
+    {
+        var (_, sessionId, code) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+
+        var response = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         await using var scope = _factory.Services.CreateAsyncScope();
         var participant = await scope.ServiceProvider.GetRequiredService<AppDbContext>().SessionParticipants
             .SingleAsync(x => x.SessionId == sessionId && x.Role == ParticipantRoles.Viewer);
-        Assert.Equal(viewer.UserId, participant.UserId);
+        Assert.Equal(viewerDeviceId, participant.DeviceId);
+    }
 
-        var foreignDevice = await AddDeviceAsync(owner.UserId, false, DeviceTypes.FlutterViewer);
-        var foreign = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = foreignDevice });
-        Assert.Equal(HttpStatusCode.NotFound, foreign.StatusCode);
+    [Fact]
+    public async Task Join_rejects_a_publisher_device_that_lacks_the_session_join_scope()
+    {
+        var (_, _, code) = await CreateSessionAsync();
+        var (publisherClient, _) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
 
-        var revokedDevice = await AddDeviceAsync(viewer.UserId, true, DeviceTypes.FlutterViewer);
-        var revoked = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = revokedDevice });
-        Assert.Equal(HttpStatusCode.Forbidden, revoked.StatusCode);
+        var response = await publisherClient.PostAsJsonAsync("/api/sessions/join", new { code });
 
-        var publisherDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.WindowsPublisher);
-        var wrongType = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = publisherDevice });
-        Assert.Equal(HttpStatusCode.Forbidden, wrongType.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_rejects_a_revoked_viewer_device_even_with_a_still_unexpired_token()
+    {
+        var (_, _, code) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await RevokeDeviceAsync(viewerDeviceId);
+
+        var response = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
     }
 
     [Fact]
     public async Task Wrong_and_expired_codes_have_the_same_response()
     {
-        var (_, sessionId, code) = await CreateSessionAsync("expiry-owner", 2);
-        var viewer = await CreateUserAsync("expiry-viewer");
-        var device = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer);
+        var (_, sessionId, code) = await CreateSessionAsync();
+        var (viewerClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
         await SetSessionExpiryAsync(sessionId, DateTimeOffset.UtcNow.AddMinutes(-1));
 
-        var expired = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = device });
-        var wrong = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code = "ZZZZZZ", deviceId = device });
+        var expired = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
+        var wrong = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code = "ZZZZZZ" });
 
         Assert.Equal(HttpStatusCode.NotFound, expired.StatusCode);
         Assert.Equal(wrong.StatusCode, expired.StatusCode);
@@ -99,9 +114,9 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     [Fact]
     public async Task Rotate_invalidates_old_code_and_returns_a_new_code()
     {
-        var (owner, sessionId, oldCode) = await CreateSessionAsync("rotate-owner", 2);
+        var (ownerClient, sessionId, oldCode) = await CreateSessionAsync();
 
-        var rotated = await owner.Client.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+        var rotated = await ownerClient.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
         var body = await ReadJsonAsync(rotated);
         var newCode = body.GetProperty("code").GetString()!;
 
@@ -109,10 +124,9 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.Matches("^[A-Z0-9]{6}$", newCode);
         Assert.NotEqual(oldCode, newCode);
 
-        var viewer = await CreateUserAsync("rotate-viewer");
-        var device = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer);
-        var oldJoin = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code = oldCode, deviceId = device });
-        var newJoin = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code = newCode, deviceId = device });
+        var (viewerClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        var oldJoin = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code = oldCode });
+        var newJoin = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code = newCode });
         Assert.Equal(HttpStatusCode.NotFound, oldJoin.StatusCode);
         Assert.Equal(HttpStatusCode.OK, newJoin.StatusCode);
     }
@@ -120,14 +134,12 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     [Fact]
     public async Task Join_rejects_viewers_beyond_the_limit()
     {
-        var (_, _, code) = await CreateSessionAsync("limit-owner", 1);
-        var first = await CreateUserAsync("limit-first");
-        var second = await CreateUserAsync("limit-second");
-        var firstDevice = await AddDeviceAsync(first.UserId, false, DeviceTypes.FlutterViewer);
-        var secondDevice = await AddDeviceAsync(second.UserId, false, DeviceTypes.FlutterViewer);
+        var (_, _, code) = await CreateSessionAsync(maxViewers: 1);
+        var (firstClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        var (secondClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
 
-        var accepted = await first.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = firstDevice });
-        var rejected = await second.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = secondDevice });
+        var accepted = await firstClient.PostAsJsonAsync("/api/sessions/join", new { code });
+        var rejected = await secondClient.PostAsJsonAsync("/api/sessions/join", new { code });
 
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
@@ -136,10 +148,9 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     [Fact]
     public async Task Join_rejects_a_second_viewer_while_the_only_slot_is_mid_reconnect_grace_period()
     {
-        var (_, sessionId, code) = await CreateSessionAsync("grace-limit-owner", 1);
-        var first = await CreateUserAsync("grace-limit-first");
-        var firstDevice = await AddDeviceAsync(first.UserId, false, DeviceTypes.FlutterViewer);
-        var joined = await first.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = firstDevice });
+        var (_, sessionId, code) = await CreateSessionAsync(maxViewers: 1);
+        var (firstClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        var joined = await firstClient.PostAsJsonAsync("/api/sessions/join", new { code });
         Assert.Equal(HttpStatusCode.OK, joined.StatusCode);
 
         // Simulate the first viewer's WebSocket dropping mid-session: the signaling endpoint
@@ -156,58 +167,48 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
             await db.SaveChangesAsync();
         }
 
-        var second = await CreateUserAsync("grace-limit-second");
-        var secondDevice = await AddDeviceAsync(second.UserId, false, DeviceTypes.FlutterViewer);
-        var rejected = await second.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = secondDevice });
+        var (secondClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        var rejected = await secondClient.PostAsJsonAsync("/api/sessions/join", new { code });
 
         Assert.Equal(HttpStatusCode.Conflict, rejected.StatusCode);
     }
 
     [Fact]
-    public async Task Create_is_rate_limited_per_user()
+    public async Task Create_is_rate_limited_by_ip_regardless_of_which_device_calls()
     {
         await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
         {
             ["RateLimits:CreateSession:PermitLimit"] = "1"
         });
-        var owner = await CreateUserAsync("limited-create", factory);
-        var firstDevice = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher, factory);
-        var secondDevice = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher, factory);
+        var (firstClient, _) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows, factory);
+        var (secondClient, _) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows, factory);
 
-        var accepted = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = firstDevice, maxViewers = 2 });
-        var rejected = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = secondDevice, maxViewers = 2 });
+        var accepted = await firstClient.PostAsJsonAsync("/api/sessions", new { maxViewers = 2 });
+        // create-session is IP-keyed (DeviceBearer tokens carry no ClaimTypes.NameIdentifier, so a
+        // per-user limiter would silently fall back to IP anyway) — a second, unrelated device
+        // hitting the same test host shares the same quota.
+        var rejected = await secondClient.PostAsJsonAsync("/api/sessions", new { maxViewers = 2 });
 
         Assert.Equal(HttpStatusCode.Created, accepted.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
-
-        var other = await CreateUserAsync("limited-create-other", factory);
-        var otherDevice = await AddDeviceAsync(other.UserId, false, DeviceTypes.WindowsPublisher, factory);
-        Assert.Equal(HttpStatusCode.Created,
-            (await other.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = otherDevice, maxViewers = 2 })).StatusCode);
     }
 
     [Fact]
-    public async Task Join_is_rate_limited_per_user()
+    public async Task Join_is_rate_limited_by_ip_regardless_of_which_device_calls()
     {
         await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
         {
             ["RateLimits:JoinSession:PermitLimit"] = "1"
         });
-        var (_, _, code) = await CreateSessionAsync("limited-join-owner", 3, factory);
-        var viewer = await CreateUserAsync("limited-join", factory);
-        var firstDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer, factory);
-        var secondDevice = await AddDeviceAsync(viewer.UserId, false, DeviceTypes.FlutterViewer, factory);
+        var (_, _, code) = await CreateSessionAsync(factory: factory, maxViewers: 3);
+        var (firstClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android, factory);
+        var (secondClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android, factory);
 
-        var accepted = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = firstDevice });
-        var rejected = await viewer.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = secondDevice });
+        var accepted = await firstClient.PostAsJsonAsync("/api/sessions/join", new { code });
+        var rejected = await secondClient.PostAsJsonAsync("/api/sessions/join", new { code });
 
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
-
-        var other = await CreateUserAsync("limited-join-other", factory);
-        var otherDevice = await AddDeviceAsync(other.UserId, false, DeviceTypes.FlutterViewer, factory);
-        Assert.Equal(HttpStatusCode.OK,
-            (await other.Client.PostAsJsonAsync("/api/sessions/join", new { code, deviceId = otherDevice })).StatusCode);
     }
 
     [Fact]
@@ -217,10 +218,10 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         {
             ["RateLimits:RotateCode:PermitLimit"] = "1"
         });
-        var (owner, sessionId, _) = await CreateSessionAsync("limited-rotate", 2, factory);
+        var (ownerClient, sessionId, _) = await CreateSessionAsync(factory);
 
-        var accepted = await owner.Client.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
-        var rejected = await owner.Client.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+        var accepted = await ownerClient.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+        var rejected = await ownerClient.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
 
         Assert.Equal(HttpStatusCode.OK, accepted.StatusCode);
         Assert.Equal(HttpStatusCode.TooManyRequests, rejected.StatusCode);
@@ -233,7 +234,7 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         {
             ["Sessions:DisconnectedParticipantRetentionHours"] = "24"
         });
-        var (_, sessionId, code) = await CreateSessionAsync("cleanup", 2, factory);
+        var (_, sessionId, _) = await CreateSessionAsync(factory);
         var staleId = Guid.NewGuid();
         var recentId = Guid.NewGuid();
         var now = DateTimeOffset.UtcNow;
@@ -247,7 +248,6 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
                 {
                     Id = staleId,
                     SessionId = sessionId,
-                    UserId = session.OwnerUserId,
                     DeviceId = session.SourceDeviceId,
                     Role = ParticipantRoles.Viewer,
                     Status = ParticipantStatuses.Disconnected,
@@ -258,7 +258,6 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
                 {
                     Id = recentId,
                     SessionId = sessionId,
-                    UserId = session.OwnerUserId,
                     DeviceId = session.SourceDeviceId,
                     Role = ParticipantRoles.Viewer,
                     Status = ParticipantStatuses.Disconnected,
@@ -278,30 +277,78 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.True(await assertDb.SessionParticipants.AnyAsync(x => x.Id == recentId));
         Assert.True(await assertDb.SessionParticipants.AnyAsync(x => x.SessionId == sessionId
             && x.Status == ParticipantStatuses.Connected));
-        var store = assertScope.ServiceProvider.GetRequiredService<ISessionCodeStore>();
-        Assert.Null(await store.RedeemAsync(HashCode(code), CancellationToken.None));
     }
 
     [Fact]
     public async Task Owner_can_list_get_and_end_a_session()
     {
-        var (owner, sessionId, _) = await CreateSessionAsync("lifecycle-owner", 2);
+        var (ownerClient, sessionId, _) = await CreateSessionAsync();
 
-        var active = await owner.Client.GetFromJsonAsync<JsonElement>("/api/sessions/active");
+        var active = await ownerClient.GetFromJsonAsync<JsonElement>("/api/sessions/active");
         Assert.Contains(active.EnumerateArray(), x => x.GetProperty("id").GetGuid() == sessionId);
-        var get = await owner.Client.GetAsync($"/api/sessions/{sessionId}");
+        var get = await ownerClient.GetAsync($"/api/sessions/{sessionId}");
         Assert.Equal(HttpStatusCode.OK, get.StatusCode);
 
-        var end = await owner.Client.PostAsync($"/api/sessions/{sessionId}/end", null);
+        var end = await ownerClient.PostAsync($"/api/sessions/{sessionId}/end", null);
         Assert.Equal(HttpStatusCode.OK, end.StatusCode);
         var ended = await ReadJsonAsync(end);
         Assert.Equal(SessionStatuses.Ended, ended.GetProperty("status").GetString());
     }
 
     [Fact]
+    public async Task A_viewer_device_cannot_end_or_rotate_a_session_it_does_not_own()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (viewerClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+
+        var end = await viewerClient.PostAsync($"/api/sessions/{sessionId}/end", null);
+        var rotate = await viewerClient.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+
+        // Both routes require the "session:end" scope, which a viewer device's token never
+        // carries (DeviceCredentialService only grants it to publishers) — so the policy itself
+        // rejects the request with 403 before the handler's own ownership check ever runs.
+        Assert.Equal(HttpStatusCode.Forbidden, end.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, rotate.StatusCode);
+    }
+
+    [Fact]
+    public async Task A_publisher_device_cannot_end_or_rotate_another_publishers_session()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (otherPublisherClient, _) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
+
+        var end = await otherPublisherClient.PostAsync($"/api/sessions/{sessionId}/end", null);
+        var rotate = await otherPublisherClient.PostAsync($"/api/sessions/{sessionId}/rotate-code", null);
+
+        // Unlike the viewer case above, this caller does hold the "session:end" scope, so the
+        // policy check passes and this actually exercises SessionEndpoints' own ownership guard
+        // (SourceDeviceId == device.Id) rather than being rejected before the handler runs.
+        Assert.Equal(HttpStatusCode.NotFound, end.StatusCode);
+        Assert.Equal(HttpStatusCode.NotFound, rotate.StatusCode);
+    }
+
+    [Fact]
+    public async Task Two_independent_device_pairs_do_not_see_each_others_sessions()
+    {
+        var (firstOwnerClient, firstSessionId, _) = await CreateSessionAsync();
+        var (secondOwnerClient, secondSessionId, _) = await CreateSessionAsync();
+
+        var firstActive = await firstOwnerClient.GetFromJsonAsync<JsonElement>("/api/sessions/active");
+        var secondActive = await secondOwnerClient.GetFromJsonAsync<JsonElement>("/api/sessions/active");
+
+        Assert.Contains(firstActive.EnumerateArray(), x => x.GetProperty("id").GetGuid() == firstSessionId);
+        Assert.DoesNotContain(firstActive.EnumerateArray(), x => x.GetProperty("id").GetGuid() == secondSessionId);
+        Assert.Contains(secondActive.EnumerateArray(), x => x.GetProperty("id").GetGuid() == secondSessionId);
+        Assert.DoesNotContain(secondActive.EnumerateArray(), x => x.GetProperty("id").GetGuid() == firstSessionId);
+
+        var crossGet = await secondOwnerClient.GetAsync($"/api/sessions/{firstSessionId}");
+        Assert.Equal(HttpStatusCode.NotFound, crossGet.StatusCode);
+    }
+
+    [Fact]
     public async Task Ending_a_session_finalizes_participants_mid_reconnect_grace_period()
     {
-        var (owner, sessionId, _) = await CreateSessionAsync("end-grace-owner", 2);
+        var (ownerClient, sessionId, _) = await CreateSessionAsync();
         var participantId = Guid.NewGuid();
         await using (var scope = _factory.Services.CreateAsyncScope())
         {
@@ -311,7 +358,6 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
             {
                 Id = participantId,
                 SessionId = sessionId,
-                UserId = session.OwnerUserId,
                 DeviceId = session.SourceDeviceId,
                 Role = ParticipantRoles.Viewer,
                 ConnectionId = null,
@@ -321,7 +367,7 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
             await db.SaveChangesAsync();
         }
 
-        var end = await owner.Client.PostAsync($"/api/sessions/{sessionId}/end", null);
+        var end = await ownerClient.PostAsync($"/api/sessions/{sessionId}/end", null);
         Assert.Equal(HttpStatusCode.OK, end.StatusCode);
 
         await using var assertScope = _factory.Services.CreateAsyncScope();
@@ -331,51 +377,31 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.NotNull(participant.LeftAt);
     }
 
-    private async Task<(TestUser Owner, Guid SessionId, string Code)> CreateSessionAsync(string prefix, int maxViewers,
+    private async Task<(HttpClient Client, Guid DeviceId)> BootstrapAsync(string deviceType, string platform,
         SonicRelayApiFactory? factory = null)
     {
-        factory ??= _factory;
-        var owner = await CreateUserAsync(prefix, factory);
-        var source = await AddDeviceAsync(owner.UserId, false, DeviceTypes.WindowsPublisher, factory);
-        var response = await owner.Client.PostAsJsonAsync("/api/sessions", new { sourceDeviceId = source, maxViewers });
+        var client = (factory ?? _factory).CreateClient();
+        var session = await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(client, deviceType, platform);
+        return (client, session.DeviceId);
+    }
+
+    private async Task<(HttpClient Owner, Guid SessionId, string Code)> CreateSessionAsync(
+        SonicRelayApiFactory? factory = null, int maxViewers = 2)
+    {
+        var (client, _) = await BootstrapAsync(DeviceTypes.WindowsPublisher, DevicePlatforms.Windows, factory);
+        var response = await client.PostAsJsonAsync("/api/sessions", new { maxViewers });
         Assert.Equal(HttpStatusCode.Created, response.StatusCode);
         var body = await ReadJsonAsync(response);
-        return (owner, body.GetProperty("id").GetGuid(), body.GetProperty("code").GetString()!);
+        return (client, body.GetProperty("id").GetGuid(), body.GetProperty("code").GetString()!);
     }
 
-    private async Task<TestUser> CreateUserAsync(string prefix, SonicRelayApiFactory? factory = null)
+    private async Task RevokeDeviceAsync(Guid deviceId)
     {
-        factory ??= _factory;
-        var client = factory.CreateClient();
-        var email = $"{prefix}-{Guid.NewGuid():N}@example.com";
-        var register = await client.PostAsJsonAsync("/auth/register", new { email, password = Password });
-        Assert.Equal(HttpStatusCode.OK, register.StatusCode);
-        var login = await client.PostAsJsonAsync("/auth/login", new { email, password = Password });
-        var tokens = await ReadJsonAsync(login);
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", tokens.GetProperty("accessToken").GetString());
-        var profile = await client.GetFromJsonAsync<JsonElement>("/auth/me");
-        return new TestUser(client, profile.GetProperty("id").GetGuid());
-    }
-
-    private async Task<Guid> AddDeviceAsync(Guid ownerUserId, bool revoked, string type,
-        SonicRelayApiFactory? factory = null)
-    {
-        factory ??= _factory;
-        var id = Guid.NewGuid();
-        await using var scope = factory.Services.CreateAsyncScope();
+        await using var scope = _factory.Services.CreateAsyncScope();
         var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        db.Devices.Add(new Device
-        {
-            Id = id,
-            OwnerUserId = ownerUserId,
-            Name = "Test device",
-            Type = type,
-            Platform = type == DeviceTypes.WindowsPublisher ? DevicePlatforms.Windows : DevicePlatforms.Android,
-            Revoked = revoked,
-            CreatedAt = DateTimeOffset.UtcNow
-        });
+        var device = await db.DeviceIdentities.SingleAsync(x => x.Id == deviceId);
+        device.Status = SonicRelay.Domain.DeviceIdentities.DeviceIdentityStatuses.Revoked;
         await db.SaveChangesAsync();
-        return id;
     }
 
     private async Task SetSessionExpiryAsync(Guid sessionId, DateTimeOffset expiry)
@@ -392,9 +418,4 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var document = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
         return document.RootElement.Clone();
     }
-
-    private static string HashCode(string code) => Convert.ToHexString(HMACSHA256.HashData(
-        Encoding.UTF8.GetBytes("integration-test-session-code-key"), Encoding.ASCII.GetBytes(code)));
-
-    private sealed record TestUser(HttpClient Client, Guid UserId);
 }

@@ -1,16 +1,14 @@
 using System.Net;
-using System.Net.Http.Headers;
-using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using SonicRelay.Domain.Devices;
 using Xunit;
 
 namespace SonicRelay.Api.IntegrationTests;
 
 public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
 {
-    private const string Password = "Valid1!Password";
     private readonly SonicRelayApiFactory _factory;
 
     public WebRtcEndpointsTests(SonicRelayApiFactory factory) => _factory = factory;
@@ -25,7 +23,7 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
     [Fact]
     public async Task Ice_servers_returns_stun_only_when_turn_is_not_configured()
     {
-        var (client, _) = await CreateUserAsync("ice-stun", _factory);
+        var (client, _) = await BootstrapAsync(_factory);
 
         var body = await GetIceServersAsync(client);
 
@@ -47,7 +45,7 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
             ["Turn:TurnUris:1"] = "turns:relay.example.com:5349?transport=tcp",
             ["Turn:CredentialTtlSeconds"] = "600"
         });
-        var (client, userId) = await CreateUserAsync("ice-turn", factory);
+        var (client, deviceId) = await BootstrapAsync(factory);
         var before = DateTimeOffset.UtcNow;
 
         var body = await GetIceServersAsync(client);
@@ -61,7 +59,7 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var username = turn.GetProperty("username").GetString()!;
         var parts = username.Split(':', 2);
         var expiry = DateTimeOffset.FromUnixTimeSeconds(long.Parse(parts[0]));
-        Assert.Equal(userId.ToString("D"), parts[1]);
+        Assert.Equal(deviceId.ToString("D"), parts[1]);
         Assert.InRange(expiry, before.AddSeconds(600).AddSeconds(-30), before.AddSeconds(600).AddSeconds(30));
 
         var expected = Convert.ToBase64String(HMACSHA1.HashData(
@@ -78,7 +76,7 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
             ["TURN_URIS"] = "turn:relay.example.com:3478?transport=udp, turn:relay.example.com:3478?transport=tcp",
             ["TURN_CREDENTIAL_TTL_SECONDS"] = "1200"
         });
-        var (client, _) = await CreateUserAsync("ice-env", factory);
+        var (client, _) = await BootstrapAsync(factory);
 
         var body = await GetIceServersAsync(client);
 
@@ -98,7 +96,7 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
             ["TURN_STATIC_AUTH_SECRET"] = "derived-host-secret",
             ["TURN_PUBLIC_HOST"] = "turn.example.com"
         });
-        var (client, _) = await CreateUserAsync("ice-host", factory);
+        var (client, _) = await BootstrapAsync(factory);
 
         var body = await GetIceServersAsync(client);
 
@@ -122,7 +120,7 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
             ["TURN_URIS"] = "turns:turn.example.com:5349?transport=tcp",
             ["STUN_URIS"] = "stun:stun.example.com:3478"
         });
-        var (client, _) = await CreateUserAsync("ice-explicit", factory);
+        var (client, _) = await BootstrapAsync(factory);
 
         var body = await GetIceServersAsync(client);
 
@@ -149,17 +147,11 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
         return true;
     }
 
-    private static async Task<(HttpClient Client, Guid UserId)> CreateUserAsync(string prefix, SonicRelayApiFactory factory)
+    private static async Task<(HttpClient Client, Guid DeviceId)> BootstrapAsync(SonicRelayApiFactory factory)
     {
         var client = factory.CreateClient();
-        var email = $"{prefix}-{Guid.NewGuid():N}@example.com";
-        var register = await client.PostAsJsonAsync("/auth/register", new { email, password = Password });
-        Assert.Equal(HttpStatusCode.OK, register.StatusCode);
-        var login = await client.PostAsJsonAsync("/auth/login", new { email, password = Password });
-        var document = await JsonDocument.ParseAsync(await login.Content.ReadAsStreamAsync());
-        client.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
-            "Bearer", document.RootElement.GetProperty("accessToken").GetString());
-        var profile = await client.GetFromJsonAsync<JsonElement>("/auth/me");
-        return (client, profile.GetProperty("id").GetGuid());
+        var session = await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(
+            client, DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
+        return (client, session.DeviceId);
     }
 }

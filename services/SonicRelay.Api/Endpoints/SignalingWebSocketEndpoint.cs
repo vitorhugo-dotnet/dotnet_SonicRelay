@@ -1,13 +1,10 @@
 using System.Net.WebSockets;
 using System.Text.Json;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using SonicRelay.Application.Abstractions;
 using SonicRelay.Api.Services;
-using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
-using SonicRelay.Domain.Users;
 using SonicRelay.Infrastructure.Persistence;
 
 namespace SonicRelay.Api.Endpoints;
@@ -24,14 +21,13 @@ public static class SignalingWebSocketEndpoint
     public static IEndpointRouteBuilder MapSignalingWebSocketEndpoint(this IEndpointRouteBuilder app)
     {
         app.MapGet("/ws/signaling", HandleAsync)
-            .RequireAuthorization("AuthenticatedUser");
+            .RequireAuthorization("signaling:connect");
         return app;
     }
 
-    private static async Task HandleAsync(HttpContext context, UserManager<ApplicationUser> userManager,
-        AppDbContext db, IConnectionRegistry registry, IParticipantReconnectTracker reconnectTracker,
-        IServiceScopeFactory scopeFactory, IConfiguration configuration, ILoggerFactory loggerFactory,
-        Observability.SonicRelayMetrics metrics)
+    private static async Task HandleAsync(HttpContext context, AppDbContext db, IConnectionRegistry registry,
+        IParticipantReconnectTracker reconnectTracker, IServiceScopeFactory scopeFactory, IConfiguration configuration,
+        ILoggerFactory loggerFactory, Observability.SonicRelayMetrics metrics)
     {
         var logger = loggerFactory.CreateLogger("SonicRelay.Signaling");
         if (!context.WebSockets.IsWebSocketRequest)
@@ -40,15 +36,14 @@ public static class SignalingWebSocketEndpoint
             return;
         }
 
-        if (!Guid.TryParse(context.Request.Query["sessionId"], out var sessionId)
-            || !Guid.TryParse(context.Request.Query["deviceId"], out var deviceId))
+        if (!Guid.TryParse(context.Request.Query["sessionId"], out var sessionId))
         {
             context.Response.StatusCode = StatusCodes.Status400BadRequest;
             return;
         }
 
-        var user = await userManager.GetUserAsync(context.User);
-        if (user is null)
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(context.User, db, context.RequestAborted);
+        if (device is null)
         {
             context.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return;
@@ -71,24 +66,9 @@ public static class SignalingWebSocketEndpoint
         }
 
         var participant = await db.SessionParticipants.SingleOrDefaultAsync(x =>
-            x.SessionId == sessionId && x.UserId == user.Id && x.DeviceId == deviceId,
+            x.SessionId == sessionId && x.DeviceId == device.Id,
             context.RequestAborted);
         if (participant is null)
-        {
-            context.Response.StatusCode = StatusCodes.Status403Forbidden;
-            return;
-        }
-
-        var expectedType = participant.Role == ParticipantRoles.Publisher
-            ? DeviceTypes.WindowsPublisher
-            : DeviceTypes.FlutterViewer;
-        var eligibility = await DeviceAccess.CheckAsync(db, deviceId, user.Id, expectedType, context.RequestAborted);
-        if (eligibility == DeviceEligibility.Missing)
-        {
-            context.Response.StatusCode = StatusCodes.Status404NotFound;
-            return;
-        }
-        if (eligibility == DeviceEligibility.Ineligible)
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
             return;
@@ -114,7 +94,7 @@ public static class SignalingWebSocketEndpoint
 
         var connectionId = Guid.NewGuid().ToString("N");
         await registry.RegisterAsync(new ConnectionDescriptor(
-            connectionId, sessionId, participant.Id, user.Id, deviceId, participant.Role,
+            connectionId, sessionId, participant.Id, device.Id, participant.Role,
             DateTimeOffset.UtcNow,
             SendFrameAsync),
             context.RequestAborted);

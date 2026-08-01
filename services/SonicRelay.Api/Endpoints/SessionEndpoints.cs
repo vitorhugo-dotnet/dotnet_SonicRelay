@@ -1,13 +1,10 @@
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Application.Abstractions;
-using SonicRelay.Api.Services;
-using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
-using SonicRelay.Domain.Users;
 using SonicRelay.Infrastructure.Persistence;
 
 namespace SonicRelay.Api.Endpoints;
@@ -16,38 +13,31 @@ public static class SessionEndpoints
 {
     public static IEndpointRouteBuilder MapSessionEndpoints(this IEndpointRouteBuilder app)
     {
-        var group = app.MapGroup("/api/sessions").RequireAuthorization().WithTags("Sessions");
-        group.MapPost("/", CreateAsync).RequireAuthorization("CanCreateSession").RequireRateLimiting("create-session");
-        group.MapGet("/active", GetActiveAsync);
-        group.MapGet("/{sessionId:guid}", GetAsync);
-        group.MapPost("/{sessionId:guid}/end", EndAsync);
-        group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync).RequireRateLimiting("rotate-code");
-        group.MapPost("/join", JoinAsync).RequireAuthorization("CanJoinSession").RequireRateLimiting("join-session");
+        var group = app.MapGroup("/api/sessions").WithTags("Sessions");
+        group.MapPost("/", CreateAsync).RequireAuthorization("session:create").RequireRateLimiting("create-session");
+        group.MapGet("/active", GetActiveAsync).RequireAuthorization("DeviceAuthenticated");
+        group.MapGet("/{sessionId:guid}", GetAsync).RequireAuthorization("DeviceAuthenticated");
+        group.MapPost("/{sessionId:guid}/end", EndAsync).RequireAuthorization("session:end");
+        group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync).RequireAuthorization("session:end").RequireRateLimiting("rotate-code");
+        group.MapPost("/join", JoinAsync).RequireAuthorization("session:join").RequireRateLimiting("join-session");
         return app;
     }
 
     private static async Task<IResult> CreateAsync(CreateSessionRequest request,
-        System.Security.Claims.ClaimsPrincipal principal, UserManager<ApplicationUser> userManager,
-        AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory,
-        CancellationToken ct)
+        ClaimsPrincipal principal, AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration,
+        ILoggerFactory loggerFactory, CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
         var maxViewers = request.MaxViewers ?? configuration.GetValue("Sessions:MaxViewersPerSession", 3);
         if (maxViewers < 1) return Results.BadRequest(new { error = "MaxViewers must be at least one." });
-
-        var eligibility = await DeviceAccess.CheckAsync(db, request.SourceDeviceId, user.Id,
-            DeviceTypes.WindowsPublisher, ct);
-        if (eligibility == DeviceEligibility.Missing) return Results.NotFound();
-        if (eligibility == DeviceEligibility.Ineligible) return Results.Forbid();
 
         var now = DateTimeOffset.UtcNow;
         var ttl = CodeTtl(configuration);
         var session = new StreamSession
         {
             Id = Guid.NewGuid(),
-            OwnerUserId = user.Id,
-            SourceDeviceId = request.SourceDeviceId,
+            SourceDeviceId = device.Id,
             MaxViewers = maxViewers,
             CodeExpiresAt = now.Add(ttl),
             CreatedAt = now
@@ -57,8 +47,7 @@ public static class SessionEndpoints
         {
             Id = Guid.NewGuid(),
             SessionId = session.Id,
-            UserId = user.Id,
-            DeviceId = request.SourceDeviceId,
+            DeviceId = device.Id,
             Role = ParticipantRoles.Publisher,
             Status = ParticipantStatuses.Connected,
             JoinedAt = now
@@ -68,23 +57,21 @@ public static class SessionEndpoints
         var code = GenerateCode();
         await codeStore.StoreAsync(HashCode(code, configuration), session.Id, ttl, ct);
         loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
-            "Created session {SessionId} for user {UserId} from device {DeviceId}", session.Id, user.Id, request.SourceDeviceId);
+            "Created session {SessionId} from device {DeviceId}", session.Id, device.Id);
         return Results.Created($"/api/sessions/{session.Id}", ToResponse(session, code));
     }
 
-    private static async Task<IResult> GetActiveAsync(System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager, AppDbContext db, CancellationToken ct)
+    private static async Task<IResult> GetActiveAsync(ClaimsPrincipal principal, AppDbContext db, CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
         var sessions = await db.StreamSessions
             .Where(x => (x.Status == SessionStatuses.Waiting || x.Status == SessionStatuses.Active)
-                && (x.OwnerUserId == user.Id || db.SessionParticipants.Any(p => p.SessionId == x.Id && p.UserId == user.Id)))
+                && (x.SourceDeviceId == device.Id || db.SessionParticipants.Any(p => p.SessionId == x.Id && p.DeviceId == device.Id)))
             .OrderByDescending(x => x.CreatedAt)
             .Select(x => new
             {
                 x.Id,
-                x.OwnerUserId,
                 x.SourceDeviceId,
                 x.Status,
                 x.MaxViewers,
@@ -98,25 +85,24 @@ public static class SessionEndpoints
         return Results.Ok(sessions);
     }
 
-    private static async Task<IResult> GetAsync(Guid sessionId, System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager, AppDbContext db, CancellationToken ct)
+    private static async Task<IResult> GetAsync(Guid sessionId, ClaimsPrincipal principal, AppDbContext db, CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
         var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId, ct);
         if (session is null) return Results.NotFound();
-        var canAccess = session.OwnerUserId == user.Id
-            || await db.SessionParticipants.AnyAsync(x => x.SessionId == sessionId && x.UserId == user.Id, ct);
+        var canAccess = session.SourceDeviceId == device.Id
+            || await db.SessionParticipants.AnyAsync(x => x.SessionId == sessionId && x.DeviceId == device.Id, ct);
         return canAccess ? Results.Ok(ToResponse(session)) : Results.NotFound();
     }
 
-    private static async Task<IResult> EndAsync(Guid sessionId, System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager, AppDbContext db, ISessionCodeStore codeStore,
-        IParticipantReconnectTracker reconnectTracker, ILoggerFactory loggerFactory, CancellationToken ct)
+    private static async Task<IResult> EndAsync(Guid sessionId, ClaimsPrincipal principal, AppDbContext db,
+        ISessionCodeStore codeStore, IParticipantReconnectTracker reconnectTracker, ILoggerFactory loggerFactory,
+        CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
-        var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId && x.OwnerUserId == user.Id, ct);
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+        var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId && x.SourceDeviceId == device.Id, ct);
         if (session is null) return Results.NotFound();
         if (session.Status != SessionStatuses.Ended)
         {
@@ -139,19 +125,18 @@ public static class SessionEndpoints
             await db.SaveChangesAsync(ct);
             await codeStore.RemoveAsync(sessionId, ct);
             loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
-                "Ended session {SessionId} for user {UserId}; disconnected {ParticipantCount} participants",
-                sessionId, user.Id, connected.Count);
+                "Ended session {SessionId} from device {DeviceId}; disconnected {ParticipantCount} participants",
+                sessionId, device.Id, connected.Count);
         }
         return Results.Ok(ToResponse(session));
     }
 
-    private static async Task<IResult> RotateCodeAsync(Guid sessionId, System.Security.Claims.ClaimsPrincipal principal,
-        UserManager<ApplicationUser> userManager, AppDbContext db, ISessionCodeStore codeStore,
-        IConfiguration configuration, ILoggerFactory loggerFactory, CancellationToken ct)
+    private static async Task<IResult> RotateCodeAsync(Guid sessionId, ClaimsPrincipal principal, AppDbContext db,
+        ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory, CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
-        var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId && x.OwnerUserId == user.Id, ct);
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+        var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId && x.SourceDeviceId == device.Id, ct);
         if (session is null) return Results.NotFound();
         if (session.Status is SessionStatuses.Ended or SessionStatuses.Expired) return Results.Conflict();
 
@@ -161,17 +146,15 @@ public static class SessionEndpoints
         await db.SaveChangesAsync(ct);
         await codeStore.StoreAsync(HashCode(code, configuration), session.Id, ttl, ct);
         loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
-            "Rotated join code for session {SessionId} by user {UserId}", session.Id, user.Id);
+            "Rotated join code for session {SessionId} from device {DeviceId}", session.Id, device.Id);
         return Results.Ok(ToResponse(session, code));
     }
 
-    private static async Task<IResult> JoinAsync(JoinSessionRequest request,
-        System.Security.Claims.ClaimsPrincipal principal, UserManager<ApplicationUser> userManager,
-        AppDbContext db, ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory,
-        CancellationToken ct)
+    private static async Task<IResult> JoinAsync(JoinSessionRequest request, ClaimsPrincipal principal, AppDbContext db,
+        ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory, CancellationToken ct)
     {
-        var user = await userManager.GetUserAsync(principal);
-        if (user is null) return Results.Unauthorized();
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
         var normalizedCode = request.Code?.Trim().ToUpperInvariant() ?? string.Empty;
         if (normalizedCode.Length != 6 || normalizedCode.Any(c => !char.IsAsciiLetterOrDigit(c)))
             return InvalidCode();
@@ -194,20 +177,16 @@ public static class SessionEndpoints
             return InvalidCode();
         }
 
-        var eligibility = await DeviceAccess.CheckAsync(db, request.DeviceId, user.Id,
-            DeviceTypes.FlutterViewer, ct);
-        if (eligibility == DeviceEligibility.Missing) return Results.NotFound();
-        if (eligibility == DeviceEligibility.Ineligible) return Results.Forbid();
         var existing = await db.SessionParticipants.SingleOrDefaultAsync(x => x.SessionId == session.Id
-            && x.DeviceId == request.DeviceId && x.Role == ParticipantRoles.Viewer, ct);
+            && x.DeviceId == device.Id && x.Role == ParticipantRoles.Viewer, ct);
         if (existing is not null)
         {
             existing.Status = ParticipantStatuses.Connected;
             existing.LeftAt = null;
             await db.SaveChangesAsync(ct);
             loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
-                "Reconnected participant {ParticipantId} to session {SessionId} for user {UserId}",
-                existing.Id, session.Id, user.Id);
+                "Reconnected participant {ParticipantId} to session {SessionId} from device {DeviceId}",
+                existing.Id, session.Id, device.Id);
             return Results.Ok(ToResponse(session));
         }
 
@@ -223,8 +202,7 @@ public static class SessionEndpoints
         {
             Id = Guid.NewGuid(),
             SessionId = session.Id,
-            UserId = user.Id,
-            DeviceId = request.DeviceId,
+            DeviceId = device.Id,
             Role = ParticipantRoles.Viewer,
             Status = ParticipantStatuses.Connected,
             JoinedAt = now
@@ -237,8 +215,8 @@ public static class SessionEndpoints
         }
         await db.SaveChangesAsync(ct);
         loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
-            "Joined session {SessionId} as participant {ParticipantId} for user {UserId} from device {DeviceId}",
-            session.Id, participant.Id, user.Id, request.DeviceId);
+            "Joined session {SessionId} as participant {ParticipantId} from device {DeviceId}",
+            session.Id, participant.Id, device.Id);
         return Results.Ok(ToResponse(session));
     }
 
@@ -247,7 +225,6 @@ public static class SessionEndpoints
     private static object ToResponse(StreamSession session, string? code = null) => new
     {
         session.Id,
-        session.OwnerUserId,
         session.SourceDeviceId,
         session.Status,
         session.MaxViewers,
@@ -278,6 +255,9 @@ public static class SessionEndpoints
         });
     }
 
-    private sealed record CreateSessionRequest(Guid SourceDeviceId, int? MaxViewers);
-    private sealed record JoinSessionRequest(string Code, Guid DeviceId);
+    // SourceDeviceId/DeviceId are no longer client-supplied: the caller's own device identity
+    // (from the DeviceBearer token) is always the publisher of a created session and always the
+    // viewer that joins, so there is nothing left for the client to assert about which device it is.
+    private sealed record CreateSessionRequest(int? MaxViewers);
+    private sealed record JoinSessionRequest(string Code);
 }

@@ -82,7 +82,7 @@ Spring Boot também seria uma escolha válida. .NET faz sentido aqui pela integr
 | `@Service` | Serviço registrado no DI |
 | JPA/Hibernate | EF Core/`DbContext` |
 | `application.yml` | `appsettings.json` e variáveis de ambiente |
-| Spring Security | ASP.NET Core Identity/Authorization |
+| Spring Security | ASP.NET Core Authentication/Authorization |
 | Filter/Middleware | ASP.NET Core Middleware |
 | Actuator Health | ASP.NET Core HealthChecks |
 
