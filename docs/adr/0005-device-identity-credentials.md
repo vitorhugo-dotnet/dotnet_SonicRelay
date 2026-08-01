@@ -35,3 +35,8 @@ rotated or revoked; short token lifetimes (default 5 minutes) and per-request
 status checks bound the exposure window. Migrating `StreamSession`/signaling
 to device ownership (Phase 2) and client integration (Phase 3) are tracked
 separately in issue #26.
+
+**Update (issue #26 Phase 4):** Identity and the `DeviceIdentity:Enabled`
+feature flag were removed (see [ADR 0006](0006-remove-identity.md));
+`DeviceBearer` is now the API's only authentication scheme and the
+device-identity/pairing endpoints are mapped unconditionally.

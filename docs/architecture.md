@@ -47,9 +47,9 @@ flowchart TD
 ## Components
 
 - `services/SonicRelay.Api`: Minimal API composition, rate limits, health checks, endpoint handlers, WebSocket signaling and session cleanup.
-- `src/SonicRelay.Domain`: user, device, session, participant and signaling-event models, and (Phase 1 of issue #26) a parallel device-identity credential and pairing model — see `docs/device-identity.md`. `StreamSession.SourceDeviceId` and `SessionParticipant.DeviceId` now reference `DeviceIdentity` rather than `ApplicationUser`/the old `Device` entity (Phase 2 of issue #26); `Device` is no longer part of the session, signaling or TURN path and remains only for its own unrelated, owner-scoped CRUD feature, pending Phase 4 cleanup.
+- `src/SonicRelay.Domain`: device-identity credential/pairing, session, participant and signaling-event models — see `docs/device-identity.md`. `StreamSession.SourceDeviceId` and `SessionParticipant.DeviceId` reference `DeviceIdentity`. ASP.NET Core Identity and the old owner-scoped `Device` entity were removed in Phase 4 of issue #26 (see [ADR 0006](adr/0006-remove-identity.md)); `SonicRelay.Domain.Devices` now only holds the `DeviceTypes`/`DevicePlatforms` constants shared with `DeviceIdentity`.
 - `src/SonicRelay.Application`: abstractions for session-code storage and live connection routing.
-- `src/SonicRelay.Infrastructure`: EF Core/PostgreSQL persistence, Identity stores, Redis session-code storage and the in-memory connection registry.
+- `src/SonicRelay.Infrastructure`: EF Core/PostgreSQL persistence, Redis session-code storage and the in-memory connection registry.
 - `infra`: development and full-stack production Compose definitions, nginx and coturn configuration.
 - `deploy`: API-only production Compose file and SSH deployment script used by GitHub Actions.
 
@@ -57,7 +57,7 @@ The signaling registry is process-local. Multiple API replicas do not share live
 
 ## Primary flow
 
-Device endpoints persist owner-scoped Windows Publisher and Flutter Viewer records. Session creation and join validate those devices before admitting participants.
+Each device bootstraps its own persistent credential and exchanges it for a short-lived `DeviceBearer` JWT; there is no human account. Session creation and join validate the caller's own device identity from its `DeviceBearer` token; nothing about which device is calling is client-asserted. Device pairing (Publisher issues a pairing challenge/QR, Viewer completes it) is a separate, independent flow used to let a Viewer discover and trust a Publisher's devices; it is not a prerequisite for creating or joining a session with a join code.
 
 ```mermaid
 sequenceDiagram
@@ -69,18 +69,20 @@ sequenceDiagram
     participant F as Flutter Viewer
     participant TURN as coturn
 
-    W->>API: POST /auth/login
-    API-->>W: access token + refresh token
-    W->>API: register Windows Publisher device
+    W->>API: POST /api/devices/bootstrap
+    API-->>W: deviceId + credential secret
+    W->>API: POST /api/devices/token
+    API-->>W: DeviceBearer access token
     W->>API: POST /api/sessions
     API->>DB: create session + publisher participant
     API->>R: store HMAC-derived code lookup with TTL
     API-->>W: session + temporary code
     W->>API: GET /ws/signaling?sessionId=...
 
-    F->>API: POST /auth/login
-    API-->>F: access token + refresh token
-    F->>API: register Flutter Viewer device
+    F->>API: POST /api/devices/bootstrap
+    API-->>F: deviceId + credential secret
+    F->>API: POST /api/devices/token
+    API-->>F: DeviceBearer access token
     F->>API: POST /api/sessions/join
     API->>R: resolve code
     API->>DB: create viewer participant
@@ -96,38 +98,49 @@ sequenceDiagram
     F-.->TURN: TURN relay fallback
 ```
 
+See [device identity](device-identity.md) for the pairing flow's own sequence.
+
 ## Persistence model
 
 ```mermaid
 erDiagram
-    APPLICATION_USER ||--o{ DEVICE : owns
-    APPLICATION_USER ||--o{ STREAM_SESSION : creates
-    APPLICATION_USER ||--o{ SESSION_PARTICIPANT : joins
-    DEVICE ||--o{ STREAM_SESSION : publishes
-    DEVICE ||--o{ SESSION_PARTICIPANT : connects_as
+    DEVICE_IDENTITY ||--o{ STREAM_SESSION : publishes
+    DEVICE_IDENTITY ||--o{ SESSION_PARTICIPANT : connects_as
+    DEVICE_IDENTITY ||--o{ PAIRING_CHALLENGE : issues
+    DEVICE_IDENTITY ||--o{ DEVICE_PAIRING : publisher_or_viewer
     STREAM_SESSION ||--o{ SESSION_PARTICIPANT : has
     STREAM_SESSION ||--o{ SIGNALING_EVENT : may_log
 
-    APPLICATION_USER {
+    DEVICE_IDENTITY {
         uuid id PK
-        string email
-        string displayName
-        bool isDisabled
-        datetime createdAt
-        datetime lastLoginAt
-    }
-    DEVICE {
-        uuid id PK
-        uuid ownerUserId
         string name
-        string type
+        string deviceType
         string platform
-        bool trusted
-        bool revoked
+        string credentialSecretHash
+        int credentialVersion
+        string status
+        datetime lastSeenAt
+        datetime revokedAt
+    }
+    PAIRING_CHALLENGE {
+        uuid id PK
+        uuid publisherDeviceId
+        string codeHash
+        datetime expiresAt
+        int maxAttempts
+        int attemptCount
+        datetime consumedAt
+    }
+    DEVICE_PAIRING {
+        uuid id PK
+        uuid publisherDeviceId
+        uuid viewerDeviceId
+        string status
+        datetime lastUsedAt
+        datetime revokedAt
     }
     STREAM_SESSION {
         uuid id PK
-        uuid ownerUserId
         uuid sourceDeviceId
         string status
         int maxViewers
@@ -136,7 +149,6 @@ erDiagram
     SESSION_PARTICIPANT {
         uuid id PK
         uuid sessionId
-        uuid userId
         uuid deviceId
         string role
         string status
@@ -155,15 +167,15 @@ EF Core maps these tables but does not declare relational foreign-key navigation
 
 ## Session and peer topology
 
-Users only see sessions they own or participate in. A publisher is expected to create one peer connection per viewer.
+A device only sees sessions it publishes or participates in. A publisher is expected to create one peer connection per viewer.
 
 ```mermaid
 flowchart LR
-    subgraph A["User A"]
+    subgraph A["Devices A"]
         A_PC["Publisher device"] --> A_SESSION["Session"]
         A_PHONE["Viewer device"] --> A_SESSION
     end
-    subgraph B["User B"]
+    subgraph B["Devices B"]
         B_PC["Publisher device"] --> B_SESSION["Session"]
         B_PHONE["Viewer device"] --> B_SESSION
     end
@@ -184,7 +196,8 @@ flowchart TD
 ## Decision records
 
 - [ADR 0001: Keep media outside the backend](adr/0001-control-plane-only.md)
-- [ADR 0002: Use Identity opaque bearer tokens](adr/0002-identity-bearer-tokens.md)
+- [ADR 0002: Use Identity opaque bearer tokens](adr/0002-identity-bearer-tokens.md) — superseded by ADR 0006
 - [ADR 0003: Split durable and ephemeral storage](adr/0003-postgresql-and-redis-storage.md)
 - [ADR 0004: Use authenticated WebSocket signaling](adr/0004-authenticated-websocket-signaling.md)
 - [ADR 0005: Symmetric device credentials with a parallel DeviceBearer scheme](adr/0005-device-identity-credentials.md) — extended in Phase 2 to sessions, signaling and TURN credential issuance
+- [ADR 0006: Remove ASP.NET Core Identity and owner-scoped Device CRUD](adr/0006-remove-identity.md)

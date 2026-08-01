@@ -1,9 +1,10 @@
-# Device Identity Auth (Phase 1)
+# Device Identity Auth
 
-This document describes the device-credential flow added alongside the
-existing Identity login (see `docs/adr/0005-device-identity-credentials.md`).
-It covers backend behavior only; Windows/Flutter client integration is a
-later phase of issue #26.
+This document describes the device-credential flow that is the API's only
+authentication scheme (see `docs/adr/0005-device-identity-credentials.md`
+and `docs/adr/0006-remove-identity.md`). It covers backend behavior; the
+Windows and Flutter clients both do real device-identity bootstrap and
+pairing (issue #26 Phase 3).
 
 ## Flow
 
@@ -37,11 +38,10 @@ later phase of issue #26.
    are restricted to a caller whose authenticated device ID participates in
    the pairing.
 
-`pairing-create` and `pairing-complete` are rate-limited by caller IP address
-(the same keying as `login`/`refresh`), not by device ID. Per-device keying
-was evaluated but is not currently achievable without making `DeviceBearer`
-the app's default authentication scheme, which is out of scope for this
-phase (`UseRateLimiter()` runs before the `DeviceBearer` principal is
+`pairing-create` and `pairing-complete` are rate-limited by caller IP address,
+not by device ID. Per-device keying was evaluated but is not currently
+achievable without making `DeviceBearer` the app's default authentication
+scheme (`UseRateLimiter()` runs before the `DeviceBearer` principal is
 populated by `UseAuthorization()`'s explicit `AddAuthenticationSchemes` call).
 `DeviceIdentity:PairingMaxAttempts` is the primary defense against pairing-code
 brute-forcing regardless of rate-limit keying granularity.
@@ -50,7 +50,6 @@ brute-forcing regardless of rate-limit keying granularity.
 
 | Key | Purpose |
 | --- | --- |
-| `DeviceIdentity:Enabled` | Feature flag; `false` removes this flow's HTTP surface entirely. |
 | `DeviceIdentity:CredentialHmacKey` | Server-side pepper for hashing device credential secrets. |
 | `DeviceIdentity:PairingCodeHmacKey` | Server-side pepper for hashing pairing codes. |
 | `DeviceIdentity:TokenSigningKey` | Symmetric signing key for `DeviceBearer` JWTs. |
@@ -61,9 +60,9 @@ brute-forcing regardless of rate-limit keying granularity.
 Set high-entropy values for `CredentialHmacKey`, `PairingCodeHmacKey`, and
 `TokenSigningKey` outside Git, the same way `Sessions:CodeHmacKey` is handled.
 
-## Sessions, signaling, and TURN (Phase 2)
+## Sessions, signaling, and TURN
 
-Session lifecycle, WebRTC signaling and TURN credential issuance now
+Session lifecycle, WebRTC signaling and TURN credential issuance
 authenticate exclusively through `DeviceBearer`. `DeviceCredentialService.ScopesFor`
 issues five additional scopes alongside `device:read`/`device:manage`/the
 pairing scopes, split by device type:
@@ -90,24 +89,17 @@ is. The WebSocket handshake follows the same rule: `GET /ws/signaling` takes
 only `sessionId` as a query parameter — the previous `deviceId` parameter is
 gone, and the connecting participant's device comes from the bearer token.
 
-`DeviceIdentity:Enabled` has a narrower meaning than the rest of this
-document might suggest: it gates only the bootstrap/token/rotate-credential/
-revoke/pairing HTTP surface described above. Sessions, signaling and TURN
-credential issuance are unconditional — they always require a valid
-`DeviceBearer` token regardless of the flag, since there is no other
-authentication path left for them to fall back to.
-
 `create-session`, `join-session` and `rotate-code` are rate-limited by caller
 IP address, the same keying (and for the same reason) as
 `pairing-create`/`pairing-complete` above: `DeviceBearer` tokens carry no
-claim a per-device or per-user limiter could key on without making
-`DeviceBearer` the app's default authentication scheme, which remains out of
-scope.
+claim a per-device limiter could key on without making `DeviceBearer` the
+app's default authentication scheme.
 
-## Out of scope in Phase 1
+## Revocation and lifecycle
 
-`ApplicationUser` and the existing owner-scoped `Device` entity are
-unchanged by this document's Phase 1 flow. `StreamSession`, signaling, and
-TURN credential issuance moved to `DeviceBearer` in Phase 2 — see
-[Sessions, signaling, and TURN (Phase 2)](#sessions-signaling-and-turn-phase-2)
-above. See issue #26 for the remaining phases.
+There is no separate account-deletion or admin user-management surface: a
+device is the whole unit of identity. `POST /api/devices/rotate-credential`
+and `POST /api/devices/revoke` (both `device:manage`-scoped, self-service —
+a device can only rotate/revoke itself, not another device) are the complete
+lifecycle-management surface. Issue #26 explicitly puts a human-user admin
+panel out of scope for this project.

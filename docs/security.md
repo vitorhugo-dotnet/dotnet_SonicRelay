@@ -4,13 +4,25 @@ This document separates controls present in the current code from work still req
 
 ## Implemented controls
 
-### Identity and tokens
+### Device identity and tokens
 
-- ASP.NET Core Identity stores users and roles in PostgreSQL and requires unique email addresses.
-- Desktop/mobile clients use opaque Identity bearer and refresh tokens. Defaults are 15 minutes and 30 days, configurable through `Auth:AccessTokenMinutes` and `Auth:RefreshTokenDays`.
-- Protected API groups and the WebSocket endpoint require authentication.
-- Account/email confirmation is not required by the current Identity configuration.
-- `/auth/logout` returns success but does not maintain a token revocation list; clients must delete local tokens.
+There is no human user account, password, email or admin role anywhere in the
+API (removed in issue #26 Phase 4; see [ADR 0006](adr/0006-remove-identity.md)).
+The only authentication scheme is `DeviceBearer`:
+
+- A device bootstraps a high-entropy credential secret once (`POST
+  /api/devices/bootstrap`); only its HMAC-SHA-256 hash, keyed by
+  `DeviceIdentity:CredentialHmacKey`, is persisted.
+- That secret is exchanged for a short-lived `DeviceBearer` JWT (`POST
+  /api/devices/token`), signed with `DeviceIdentity:TokenSigningKey` and
+  valid for `DeviceIdentity:AccessTokenMinutes` (default 5).
+- Every scoped request re-checks the device's live status and credential
+  version against the database (`DeviceScopeAuthorizationHandler`), so
+  rotation (`POST /api/devices/rotate-credential`) and revocation (`POST
+  /api/devices/revoke`) take effect immediately despite the JWT being
+  self-contained.
+- Protected API groups and the WebSocket endpoint require a valid
+  `DeviceBearer` token; there is no fallback authentication path.
 
 ### Authorization and isolation
 
@@ -21,7 +33,7 @@ This document separates controls present in the current code from work still req
 - WebSocket upgrade requires a `signaling:connect`-scoped token and a matching session participant record for the caller's device.
 - Signaling routing always uses the authenticated participant as `from` and restricts recipients to the same session.
 
-The named policies `session:create`, `session:join`, `session:end`, `signaling:connect` and `turn:credentials` each require a `DeviceBearer` token carrying the matching scope; `DeviceScopeAuthorizationHandler` also re-checks the device's live status and credential version against the database on every request, so revocation and credential rotation take effect immediately. `CanRegisterDevice`, used only by the unrelated, pre-existing owner-scoped `Device` CRUD feature, still just requires authentication.
+The named policies `session:create`, `session:join`, `session:end`, `signaling:connect`, `turn:credentials`, `device:read`, `device:manage`, `pairing:create`, `pairing:complete` and `pairing:revoke` each require a `DeviceBearer` token carrying the matching scope; `DeviceScopeAuthorizationHandler` also re-checks the device's live status and credential version against the database on every request, so revocation and credential rotation take effect immediately. `DeviceAuthenticated` is a scope-less variant of the same check, used by read-only routes that need no capability beyond an active device.
 
 ### Session codes
 
@@ -33,47 +45,37 @@ The named policies `session:create`, `session:join`, `session:end`, `signaling:c
 
 Current limitation: successful join lookup does not consume a code. A code can be reused until rotation, session end or expiry.
 
-### Device identity credentials (Phase 1 of issue #26)
+### Device pairing
 
-- Device bootstrap issues a high-entropy secret once; only its HMAC-SHA-256
-  output, keyed by `DeviceIdentity:CredentialHmacKey`, is persisted.
-- Access tokens are short-lived JWTs on a separate `DeviceBearer` scheme;
-  every scoped request re-checks device status and credential version against
-  the database, so rotation and revocation take effect immediately.
-- Pairing codes follow the session-code convention: HMAC-hashed, short TTL,
-  attempt-limited, and indistinguishable failure responses. `pairing-create`
-  and `pairing-complete` are rate-limited by IP, not by device: per-device
-  keying was evaluated but would require making `DeviceBearer` the app's
-  default authentication scheme, which is out of scope for this phase, so
+- Pairing codes follow the session-code convention: HMAC-hashed (keyed by
+  `DeviceIdentity:PairingCodeHmacKey`), short TTL
+  (`DeviceIdentity:PairingCodeTtlMinutes`), attempt-limited
+  (`DeviceIdentity:PairingMaxAttempts`), and indistinguishable failure
+  responses.
+- `pairing-create` and `pairing-complete` are rate-limited by IP, not by
+  device: per-device keying was evaluated but would require making
+  `DeviceBearer` the app's default authentication scheme, so
   `DeviceIdentity:PairingMaxAttempts` remains the primary defense against
   pairing-code brute-forcing.
-- The entire flow is gated by `DeviceIdentity:Enabled` and does not affect
-  the existing Identity login endpoints.
-- Sessions, signaling and TURN credential issuance (Phase 2 of issue #26)
-  now authenticate exclusively via `DeviceBearer`; the previous
-  Identity-based, `ApplicationUser`-owned session path no longer exists for
-  these routes. `DeviceScopeAuthorizationHandler`'s live device-status and
+- `DeviceScopeAuthorizationHandler`'s live device-status and
   credential-version check — the same one backing the scoped
   `session:*`/`signaling:connect`/`turn:credentials` policies above — also
   protects three read-only routes that need no capability beyond an active
   device: `GET /api/sessions/active`, `GET /api/sessions/{id}` and
   `POST /api/webrtc/stats`, via a scope-less `DeviceAuthenticated` policy
-  rather than a capability-scoped one. `DeviceIdentity:Enabled` now only
-  gates the bootstrap/token/rotate-credential/revoke/pairing HTTP surface
-  above; sessions, signaling and TURN have no fallback authentication path
-  and require `DeviceBearer` regardless of the flag.
+  rather than a capability-scoped one.
 
 ### Abuse and data exposure
 
-- Fixed-window limits return `429`: login, refresh, device-bootstrap, device-token, pairing-create, pairing-complete, create-session, join-session and rotate-code are all keyed by IP. Create/join/rotate cannot be keyed by device or user: `DeviceBearer` tokens carry no claim a per-caller limiter could key on (see [Device identity credentials](#device-identity-credentials-phase-1-of-issue-26)).
-- Defaults per 60-second window are login `5`, refresh `5`, create `10`, join `10`, rotate `5`, device-bootstrap `10`, device-token `10`, pairing-create `10`, pairing-complete `10`.
+- Fixed-window limits return `429`: device-bootstrap, device-token, pairing-create, pairing-complete, create-session, join-session and rotate-code are all keyed by IP. Create/join/rotate cannot be keyed by device: `DeviceBearer` tokens carry no claim a per-caller limiter could key on.
+- Defaults per 60-second window are create `10`, join `10`, rotate `5`, device-bootstrap `10`, device-token `10`, pairing-create `10`, pairing-complete `10`.
 - Signaling frames are limited to 64 KiB text messages.
 - Signaling logs record routing metadata only; SDP and ICE payloads are not logged by the endpoint.
 - Readiness checks include PostgreSQL and Redis; liveness does not expose dependency state.
 
 ## Secrets and deployment
 
-- Set a high-entropy `Sessions__CodeHmacKey`; the Compose development fallback is not production-safe.
+- Set high-entropy `Sessions__CodeHmacKey`, `DeviceIdentity__CredentialHmacKey`, `DeviceIdentity__PairingCodeHmacKey` and `DeviceIdentity__TokenSigningKey`; the Compose development fallbacks are not production-safe.
 - Keep PostgreSQL, Redis, TURN and SSH credentials outside Git. The CI deploy script expects runtime secrets in `/opt/sonicrelay/.env` (or the configured app directory).
 - The automated Compose file binds the API to `127.0.0.1:8080` by default; terminate TLS at a reverse proxy.
 - TURN/STUN must use its native ports and should not be placed behind a normal HTTP reverse proxy.
@@ -82,9 +84,7 @@ Current limitation: successful join lookup does not consume a code. A code can b
 
 - Device ownership and lifecycle are enforced by handlers; policy names alone do not express those resource checks.
 - There is no CORS configuration. Browser-based clients need an explicit allowlist before use.
-- There is no access/refresh-token server-side revocation mechanism.
-- `ApplicationUser.IsDisabled` exists but is not checked by endpoint authorization.
-- Email confirmation is disabled even though the production environment example suggests it should be required; `AUTH_REQUIRE_CONFIRMED_EMAIL` is not read by the application.
+- There is no admin UI/API for device management beyond a device's own rotate/revoke endpoints; a human operator cannot remotely revoke another device's credential. Issue #26 explicitly scopes a human-user admin panel out of this project.
 - The live signaling registry is in memory, preventing safe multi-replica routing without sticky sessions or a backplane.
 - TURN uses static configuration; temporary per-session TURN credentials are not issued by the API.
 - The API-only CI deployment does not provision PostgreSQL, Redis, coturn, TLS or backups.

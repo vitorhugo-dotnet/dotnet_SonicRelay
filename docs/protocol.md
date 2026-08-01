@@ -1,6 +1,6 @@
 # HTTP and WebSocket protocol
 
-This document describes routes mapped by the current API. Unless marked public, HTTP requests require `Authorization: Bearer <opaque-access-token>`.
+This document describes routes mapped by the current API. Unless marked public, HTTP requests require `Authorization: Bearer <device-access-token>`, a `DeviceBearer` JWT issued by `POST /api/devices/token` (see [device identity](device-identity.md)). There is no human user account, login or password anywhere in the API.
 
 ## Health
 
@@ -11,60 +11,57 @@ This document describes routes mapped by the current API. Unless marked public, 
 
 Swagger is enabled by default only in Development, or when `Swagger:Enabled=true`.
 
-## Authentication
+## Device identity
 
-`MapIdentityApi<ApplicationUser>` maps the standard ASP.NET Core Identity API under `/auth`: `/register`, `/login`, `/refresh`, `/confirmEmail`, `/resendConfirmationEmail`, `/forgotPassword`, `/resetPassword`, `/manage/2fa` and `/manage/info`. The framework owns their request/response contracts. This project additionally maps:
+Device bootstrap and token exchange are public (no `Authorization` header); everything else requires a `DeviceBearer` access token with the matching scope. See [device identity](device-identity.md) for the full flow, scopes and configuration.
 
 | Method | Route | Auth | Behavior |
 | --- | --- | --- | --- |
-| `POST` | `/auth/logout` | Required | Returns `204`; it does not revoke already issued self-contained bearer tokens. |
-| `GET` | `/auth/me` | Required | Returns `id`, `email`, `displayName`, `emailConfirmed`, `createdAt` and `lastLoginAt`. |
+| `POST` | `/api/devices/bootstrap` | Public, rate-limited | Validates type/platform, persists a `DeviceIdentity` and returns the device ID plus a credential secret shown exactly once. |
+| `POST` | `/api/devices/token` | Public, rate-limited | Exchanges a device ID and credential secret for a short-lived `DeviceBearer` JWT with scopes for that device type. |
+| `POST` | `/api/devices/rotate-credential` | `device:manage` | Requires the current secret; issues a new one and bumps the credential version, invalidating tokens issued under the previous one. |
+| `POST` | `/api/devices/revoke` | `device:manage` | Idempotently revokes the caller's own device; a device cannot revoke another device. |
 
-For desktop/mobile login, omit cookies or use `POST /auth/login?useCookies=false`. The response contains an opaque bearer access token, expiry and refresh token; it is not a JWT.
+Bootstrap response:
 
 ```json
-{
-  "tokenType": "Bearer",
-  "accessToken": "<opaque-access-token>",
-  "expiresIn": 900,
-  "refreshToken": "<opaque-refresh-token>"
-}
+{ "deviceId": "<uuid>", "credentialSecret": "<shown once>", "credentialVersion": 1 }
 ```
 
-Login and refresh use fixed-window, IP-keyed rate limits.
+Token response:
 
-## Devices
+```json
+{ "accessToken": "<jwt>", "expiresAt": "2026-08-01T14:05:00Z", "scopes": ["session:create", "..."] }
+```
 
-All device routes require authentication and operate only on devices owned by the caller.
+Valid `deviceType`/`platform` pairs are `windows_publisher`/`windows` and `flutter_viewer`/`android|ios`. Revoked devices cannot bootstrap new tokens or create, join or connect to sessions.
 
-| Method | Route | Current behavior |
-| --- | --- | --- |
-| `POST` | `/api/devices/` | Validates type/platform, persists a device and returns `201 Created`. |
-| `GET` | `/api/devices/` | Lists the caller's devices. |
-| `GET` | `/api/devices/{deviceId}` | Returns an owned device or `404`. |
-| `PATCH` | `/api/devices/{deviceId}` | Updates an owned device's name and/or public key. |
-| `DELETE` | `/api/devices/{deviceId}` | Deletes an owned device and returns `204`. |
-| `POST` | `/api/devices/{deviceId}/revoke` | Idempotently revokes an owned device. |
+## Device pairing
 
-Valid pairs are `windows_publisher`/`windows` and `flutter_viewer`/`android|ios`. Revoked devices cannot create, join or connect to sessions.
+| Method | Route | Auth | Behavior |
+| --- | --- | --- | --- |
+| `POST` | `/api/pairings/challenges` | `pairing:create` | A publisher device issues a short-TTL pairing code plus QR payload. |
+| `POST` | `/api/pairings/complete` | `pairing:complete` | A viewer device redeems the code and creates a `DevicePairing`. |
+| `GET` | `/api/devices/{deviceId}/pairings` | `device:read` | Lists a device's active pairings; only the device itself may query its own. |
+| `DELETE` | `/api/pairings/{pairingId}` | `pairing:revoke` | Idempotently revokes a pairing the caller's device participates in. |
 
 ## Sessions
 
-All session routes require authentication.
+All session routes require a `DeviceBearer` token; the caller's own device (from the token, never client-supplied) is always the publisher of a session it creates and always the viewer that joins one.
 
-| Method | Route | Behavior |
-| --- | --- | --- |
-| `POST` | `/api/sessions/` | Creates a waiting session and publisher participant for an owned, non-revoked source device; returns `201` and a six-character code. |
-| `GET` | `/api/sessions/active` | Lists waiting/active sessions owned by or joined by the caller, including connected viewer count. |
-| `GET` | `/api/sessions/{sessionId}` | Returns a session to its owner or participant; inaccessible sessions return `404`. |
-| `POST` | `/api/sessions/{sessionId}/end` | Owner-only; marks the session ended, disconnects participants and removes the Redis code. Idempotently returns the ended session. |
-| `POST` | `/api/sessions/{sessionId}/rotate-code` | Owner-only; rejects ended/expired sessions with `409`, invalidates the previous code and returns a new code. |
-| `POST` | `/api/sessions/join` | Resolves a valid code and owned viewer device, enforces the viewer limit, creates/reconnects a participant and activates a waiting session. |
+| Method | Route | Scope | Behavior |
+| --- | --- | --- | --- |
+| `POST` | `/api/sessions/` | `session:create` | Creates a waiting session and publisher participant for the caller's device; returns `201` and a six-character code. |
+| `GET` | `/api/sessions/active` | `DeviceAuthenticated` | Lists waiting/active sessions published or joined by the caller's device, including connected viewer count. |
+| `GET` | `/api/sessions/{sessionId}` | `DeviceAuthenticated` | Returns a session to its publisher or a participant; inaccessible sessions return `404`. |
+| `POST` | `/api/sessions/{sessionId}/end` | `session:end` | Publisher-only; marks the session ended, disconnects participants and removes the Redis code. Idempotently returns the ended session. |
+| `POST` | `/api/sessions/{sessionId}/rotate-code` | `session:end` | Publisher-only; rejects ended/expired sessions with `409`, invalidates the previous code and returns a new code. |
+| `POST` | `/api/sessions/join` | `session:join` | Resolves a valid code, enforces the viewer limit, creates/reconnects a participant for the caller's device and activates a waiting session. |
 
 Create request:
 
 ```json
-{ "sourceDeviceId": "<uuid>", "maxViewers": 3 }
+{ "maxViewers": 3 }
 ```
 
 `maxViewers` defaults to `Sessions:MaxViewersPerSession` and must be at least one. There is currently no upper bound.
@@ -72,12 +69,12 @@ Create request:
 Join request:
 
 ```json
-{ "code": "ABC123", "deviceId": "<uuid>" }
+{ "code": "ABC123" }
 ```
 
 Codes are trimmed, uppercased and must contain exactly six ASCII letters/digits. Wrong, malformed, expired and terminal-session codes all return `404` with the same error. Despite the store method name `RedeemAsync`, a successful lookup does not consume the code; it remains reusable until rotation, session end or expiry.
 
-Session responses contain `id`, `ownerUserId`, `sourceDeviceId`, `status`, `maxViewers`, `codeExpiresAt`, `startedAt`, `endedAt`, `createdAt`, and `code` when a new code is issued.
+Session responses contain `id`, `sourceDeviceId`, `status`, `maxViewers`, `codeExpiresAt`, `startedAt`, `endedAt`, `createdAt`, and `code` when a new code is issued.
 
 ## WebSocket signaling
 
@@ -95,9 +92,9 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 
 ### Fluxo do Publisher
 
-1. Autentique pela API e registre um device `windows_publisher`/`windows`.
+1. Bootstrap (`POST /api/devices/bootstrap`) and get a token (`POST /api/devices/token`) for a `windows_publisher`/`windows` device.
 2. Crie uma sessão com `POST /api/sessions/` e exiba o código temporário ao usuário.
-3. Abra o WebSocket autenticado usando `sessionId` e o ID do device Publisher.
+3. Abra o WebSocket autenticado usando `sessionId`; o device Publisher é derivado do `DeviceBearer` token.
 4. Guarde seu `participantId` recebido em `session.joined`. Quando outro `session.joined` anunciar um Viewer, use o `participantId` do payload como destino de `publisher.ready`.
 5. Para cada Viewer, crie uma `RTCPeerConnection`, adicione a faixa de áudio Opus e envie uma `webrtc.offer` direcionada ao `participantId` dele.
 6. Ao receber `webrtc.answer`, aplique o SDP como remote description na conexão daquele Viewer.
@@ -106,8 +103,8 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 
 ### Fluxo do Viewer
 
-1. Autentique pela API, registre um device `flutter_viewer` para `android` ou `ios` e entre com `POST /api/sessions/join`.
-2. Abra o WebSocket autenticado usando os `sessionId` e `deviceId` retornados/registrados.
+1. Bootstrap (`POST /api/devices/bootstrap`) e obtenha um token (`POST /api/devices/token`) para um device `flutter_viewer` (`android` ou `ios`), depois entre com `POST /api/sessions/join`.
+2. Abra o WebSocket autenticado usando o `sessionId` retornado; o device Viewer é derivado do `DeviceBearer` token.
 3. Guarde seu `participantId` recebido em `session.joined`. Ao receber `publisher.ready`, aprenda o ID do Publisher pelo campo autenticado `from` e responda com `viewer.ready` para esse destino.
 4. Ao receber `webrtc.offer`, crie/configure a `RTCPeerConnection` e aplique o SDP como remote description.
 5. Gere a answer, aplique-a localmente e envie `webrtc.answer` ao Publisher.
@@ -119,16 +116,16 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 Connect with an authenticated WebSocket upgrade:
 
 ```text
-GET /ws/signaling?sessionId={uuid}&deviceId={uuid}
-Authorization: Bearer <opaque-access-token>
+GET /ws/signaling?sessionId={uuid}
+Authorization: Bearer <device-access-token>
 ```
 
 Before upgrade, the API verifies:
 
-- both query parameters are UUIDs;
+- `sessionId` is a UUID;
+- the caller's `DeviceBearer` token is valid, its device is active and its credential version is current;
 - the session exists and is not ended, expired or past `codeExpiresAt`;
-- the device belongs to the authenticated user and is not revoked;
-- a participant matches the session, user and device.
+- a participant matches the session and the caller's device.
 
 Validation failures return HTTP `400`, `401`, `403`, `404` or `410` before the upgrade. Every server frame uses this envelope:
 
@@ -197,7 +194,7 @@ session is still live, the server holds the participant in a `reconnecting` stat
 `Sessions__ParticipantDisconnectGraceSeconds`) before finalizing it as left:
 
 1. On disconnect, other participants receive `participant.disconnected` with `{ "participantId": "<uuid>" }`. Treat this as "peer is transiently unreachable" — keep the peer connection and wait, do not tear it down yet.
-2. If the same participant (same session, user and device) reconnects its WebSocket within the grace period, the reused participant row is reported to peers as `participant.reconnected` (same payload shape as `session.joined`: `{ "participantId": "<uuid>", "role": "publisher" | "viewer" }`) instead of a fresh `session.joined`. The reconnecting client itself always gets `session.joined` about itself, as on a first connect, so it can confirm its `participantId`. Clients should resume the existing peer connection on `participant.reconnected`, restarting ICE or renegotiating rather than starting over from scratch.
+2. If the same participant (same session and device) reconnects its WebSocket within the grace period, the reused participant row is reported to peers as `participant.reconnected` (same payload shape as `session.joined`: `{ "participantId": "<uuid>", "role": "publisher" | "viewer" }`) instead of a fresh `session.joined`. The reconnecting client itself always gets `session.joined` about itself, as on a first connect, so it can confirm its `participantId`. Clients should resume the existing peer connection on `participant.reconnected`, restarting ICE or renegotiating rather than starting over from scratch.
 3. If the grace period elapses without a reconnect, the participant is finalized as disconnected and peers receive the usual `session.left`.
 
 A participant that rejoins via `POST /api/sessions/join` before reopening its WebSocket (a full manual reconnect) also cancels any pending grace period once its new WebSocket connects, so both a lightweight socket-only retry and a full re-authenticate-and-rejoin flow converge on the same `participant.reconnected` signal. Ending a session (`POST /api/sessions/{sessionId}/end`) always wins immediately over a pending grace period.
@@ -252,11 +249,11 @@ Configure STUN e TURN/coturn nos clients ao criar a peer connection. Essas crede
 
 ### O que o backend valida
 
-- token de acesso e upgrade WebSocket;
-- formato UUID de `sessionId` e `deviceId`;
+- token de acesso (`DeviceBearer`) e upgrade WebSocket;
+- formato UUID de `sessionId`;
+- status ativo e versão de credencial do device autenticado (revogação/rotação têm efeito imediato);
 - existência e estado/validade temporal da sessão;
-- propriedade, tipo esperado e revogação do device;
-- participação do usuário/device na sessão;
+- participação do device na sessão;
 - JSON válido, `type` permitido, limite de 64 KiB e frame textual;
 - presença/formato de `to` e pertencimento do destinatário à mesma sessão;
 - identidade do remetente, derivada do socket autenticado.
