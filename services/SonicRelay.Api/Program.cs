@@ -1,11 +1,8 @@
-using System.Security.Claims;
 using System.Text;
 using System.Threading.RateLimiting;
-using Microsoft.AspNetCore.Authentication.BearerToken;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
@@ -16,8 +13,6 @@ using SonicRelay.Api.Services;
 using SonicRelay.Infrastructure;
 
 var builder = WebApplication.CreateBuilder(args);
-
-var deviceIdentityEnabled = builder.Configuration.GetValue("DeviceIdentity:Enabled", true);
 
 // The signaling receive loop polls session state every second per socket, which
 // floods the console with EF `SELECT Status, CodeExpiresAt` command logs. Keep
@@ -71,8 +66,6 @@ builder.Services.PostConfigure<TurnOptions>(options =>
         options.CredentialTtlSeconds = ttl;
     }
 });
-builder.Services.AddScoped<AccountDeletionService>();
-
 builder.Services.Configure<DeviceIdentityOptions>(builder.Configuration.GetSection("DeviceIdentity"));
 builder.Services.AddSingleton<DeviceCredentialService>();
 builder.Services.AddSingleton<PairingChallengeService>();
@@ -100,22 +93,6 @@ builder.Services.AddAuthentication().AddJwtBearer("DeviceBearer", jwtOptions =>
     };
 });
 
-// Notify n8n (or any webhook) when an account is deleted so an operator gets an email.
-// Falls back to a no-op when no webhook is configured (tests, local dev).
-var deletionWebhookUrl = builder.Configuration["Notifications:AccountDeletionWebhookUrl"];
-if (!string.IsNullOrWhiteSpace(deletionWebhookUrl))
-{
-    builder.Services.AddHttpClient("account-deletion-webhook");
-    builder.Services.AddSingleton<IAccountDeletionNotifier>(sp => new WebhookAccountDeletionNotifier(
-        sp.GetRequiredService<IHttpClientFactory>().CreateClient("account-deletion-webhook"),
-        deletionWebhookUrl,
-        sp.GetRequiredService<ILogger<WebhookAccountDeletionNotifier>>()));
-}
-else
-{
-    builder.Services.AddSingleton<IAccountDeletionNotifier, NullAccountDeletionNotifier>();
-}
-
 builder.Services.AddSingleton<SessionCleanupService>();
 builder.Services.AddSingleton<IHostedService>(services => services.GetRequiredService<SessionCleanupService>());
 builder.Services.AddRateLimiter(options =>
@@ -136,8 +113,6 @@ builder.Services.AddRateLimiter(options =>
         return ValueTask.CompletedTask;
     };
 
-    options.AddPolicy("login", context => IpLimit(context, "RateLimits:Login", 5));
-    options.AddPolicy("refresh", context => IpLimit(context, "RateLimits:Refresh", 5));
     options.AddPolicy("create-session", context => IpLimit(context, "RateLimits:CreateSession", 10));
     options.AddPolicy("join-session", context => IpLimit(context, "RateLimits:JoinSession", 10));
     options.AddPolicy("rotate-code", context => IpLimit(context, "RateLimits:RotateCode", 5));
@@ -146,20 +121,11 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("pairing-create", context => IpLimit(context, "RateLimits:PairingCreate", 10));
     options.AddPolicy("pairing-complete", context => IpLimit(context, "RateLimits:PairingComplete", 10));
 });
-builder.Services.Configure<BearerTokenOptions>(IdentityConstants.BearerScheme, options =>
-{
-    options.BearerTokenExpiration = TimeSpan.FromMinutes(builder.Configuration.GetValue("Auth:AccessTokenMinutes", 15));
-    options.RefreshTokenExpiration = TimeSpan.FromDays(builder.Configuration.GetValue("Auth:RefreshTokenDays", 30));
-});
 builder.Services.AddHealthChecks()
     .AddNpgSql(builder.Configuration.GetConnectionString("Postgres") ?? string.Empty, name: "postgres")
     .AddRedis(builder.Configuration["Redis:ConnectionString"] ?? string.Empty, name: "redis");
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy("AuthenticatedUser", policy => policy.RequireAuthenticatedUser());
-    options.AddPolicy("CanRegisterDevice", policy => policy.RequireAuthenticatedUser());
-    options.AddPolicy("AdminOnly", policy => policy.RequireRole("admin"));
-
     options.AddPolicy("DeviceAuthenticated", policy =>
     {
         policy.AddAuthenticationSchemes("DeviceBearer");
@@ -168,7 +134,10 @@ builder.Services.AddAuthorization(options =>
     });
 
     foreach (var scope in new[]
-        { "session:create", "session:join", "session:end", "signaling:connect", "turn:credentials" })
+    {
+        "session:create", "session:join", "session:end", "signaling:connect", "turn:credentials",
+        "device:read", "device:manage", "pairing:create", "pairing:complete", "pairing:revoke"
+    })
     {
         options.AddPolicy(scope, policy =>
         {
@@ -176,19 +145,6 @@ builder.Services.AddAuthorization(options =>
             policy.RequireAuthenticatedUser();
             policy.Requirements.Add(new DeviceScopeRequirement(scope));
         });
-    }
-
-    if (deviceIdentityEnabled)
-    {
-        foreach (var scope in new[] { "device:read", "device:manage", "pairing:create", "pairing:complete", "pairing:revoke" })
-        {
-            options.AddPolicy(scope, policy =>
-            {
-                policy.AddAuthenticationSchemes("DeviceBearer");
-                policy.RequireAuthenticatedUser();
-                policy.Requirements.Add(new DeviceScopeRequirement(scope));
-            });
-        }
     }
 });
 
@@ -210,20 +166,11 @@ app.MapHealthChecks("/health/ready");
 // Prometheus scrape endpoint (issue #21). Anonymous so Prometheus can scrape it;
 // exposes only aggregate SonicRelay metrics, no session ids or PII.
 app.MapMetrics();
-app.MapAuthEndpoints();
-app.MapAccountEndpoints();
-app.MapAdminEndpoints();
-app.MapDeviceEndpoints();
-if (deviceIdentityEnabled)
-{
-    app.MapDeviceIdentityEndpoints();
-    app.MapPairingEndpoints();
-}
+app.MapDeviceIdentityEndpoints();
+app.MapPairingEndpoints();
 app.MapSessionEndpoints();
 app.MapWebRtcEndpoints();
 app.MapSignalingWebSocketEndpoint();
-
-await IdentitySeeder.SeedAsync(app.Services);
 
 app.Run();
 
