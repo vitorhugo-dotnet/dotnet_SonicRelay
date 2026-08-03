@@ -1,18 +1,12 @@
-using Microsoft.AspNetCore.Identity;
-using Microsoft.AspNetCore.Identity.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Domain.DeviceIdentities;
-using SonicRelay.Domain.Devices;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Domain.Signaling;
-using SonicRelay.Domain.Users;
 
 namespace SonicRelay.Infrastructure.Persistence;
 
-public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
-    : IdentityDbContext<ApplicationUser, IdentityRole<Guid>, Guid>(options)
+public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(options)
 {
-    public DbSet<Device> Devices => Set<Device>();
     public DbSet<StreamSession> StreamSessions => Set<StreamSession>();
     public DbSet<SessionParticipant> SessionParticipants => Set<SessionParticipant>();
     public DbSet<SignalingEvent> SignalingEvents => Set<SignalingEvent>();
@@ -23,30 +17,6 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options)
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
-
-        modelBuilder.Entity<ApplicationUser>(entity =>
-        {
-            entity.ToTable("application_users");
-            entity.Property(x => x.DisplayName).HasMaxLength(120).IsRequired();
-        });
-
-        modelBuilder.Entity<IdentityRole<Guid>>().ToTable("identity_roles");
-        modelBuilder.Entity<IdentityUserClaim<Guid>>().ToTable("identity_user_claims");
-        modelBuilder.Entity<IdentityUserRole<Guid>>().ToTable("identity_user_roles");
-        modelBuilder.Entity<IdentityUserLogin<Guid>>().ToTable("identity_user_logins");
-        modelBuilder.Entity<IdentityRoleClaim<Guid>>().ToTable("identity_role_claims");
-        modelBuilder.Entity<IdentityUserToken<Guid>>().ToTable("identity_user_tokens");
-
-        modelBuilder.Entity<Device>(entity =>
-        {
-            entity.ToTable("devices");
-            entity.HasKey(x => x.Id);
-            entity.Property(x => x.Name).HasMaxLength(120).IsRequired();
-            entity.Property(x => x.Type).HasMaxLength(40).IsRequired();
-            entity.Property(x => x.Platform).HasMaxLength(40).IsRequired();
-            entity.HasIndex(x => x.OwnerUserId).HasDatabaseName("ix_devices_owner_user_id");
-            entity.HasIndex(x => new { x.OwnerUserId, x.Type }).HasDatabaseName("ix_devices_owner_type");
-        });
 
         modelBuilder.Entity<StreamSession>(entity =>
         {

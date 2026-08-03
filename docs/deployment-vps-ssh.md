@@ -56,8 +56,6 @@ API_BIND=127.0.0.1:8080
 ConnectionStrings__Postgres=Host=postgres.example.internal;Port=5432;Database=sonicrelay;Username=sonicrelay;Password=CHANGE_ME
 Redis__ConnectionString=redis.example.internal:6379,password=CHANGE_ME,abortConnect=false
 
-Auth__AccessTokenMinutes=15
-Auth__RefreshTokenDays=30
 Sessions__CodeTtlMinutes=10
 Sessions__CodeHmacKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET
 Sessions__MaxViewersPerSession=3
@@ -66,7 +64,13 @@ Sessions__CleanupIntervalSeconds=60
 Sessions__DisconnectedParticipantRetentionHours=24
 Sessions__ParticipantDisconnectGraceSeconds=15
 Swagger__Enabled=false
+
+DeviceIdentity__CredentialHmacKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET
+DeviceIdentity__PairingCodeHmacKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET
+DeviceIdentity__TokenSigningKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET_32_BYTES_MIN
 ```
+
+All three `DeviceIdentity__*` keys are required: sessions, signaling and TURN credential issuance authenticate exclusively via the `DeviceBearer` scheme and have no fallback, so device bootstrap and token issuance fail without them. See [device identity configuration](device-identity.md#configuration).
 
 The compose service binds to loopback by default. Put nginx, Caddy or another TLS reverse proxy in front of `127.0.0.1:8080` and forward WebSocket upgrades for `/ws/signaling`.
 

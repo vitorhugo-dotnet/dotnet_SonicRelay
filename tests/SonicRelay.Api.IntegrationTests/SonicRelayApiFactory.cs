@@ -28,8 +28,6 @@ public sealed class SonicRelayApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Sessions:CodeTtlMinutes", "10");
         builder.UseSetting("Sessions:CodeHmacKey", "integration-test-session-code-key");
         builder.UseSetting("Sessions:CleanupEnabled", "false");
-        builder.UseSetting("RateLimits:Login:PermitLimit", "100");
-        builder.UseSetting("RateLimits:Refresh:PermitLimit", "100");
         builder.UseSetting("RateLimits:CreateSession:PermitLimit", "100");
         builder.UseSetting("RateLimits:JoinSession:PermitLimit", "100");
         builder.UseSetting("RateLimits:RotateCode:PermitLimit", "100");

@@ -14,3 +14,5 @@ Store Identity and domain entities in PostgreSQL through EF Core. Store HMAC-der
 ## Consequences
 
 Both PostgreSQL and Redis are readiness dependencies. Operators must back up PostgreSQL and protect both credentials. Redis loss invalidates active join codes but does not erase durable sessions; code rotation can restore lookup state.
+
+**Update (issue #26 Phase 4):** "Identity" here refers to the ASP.NET Core Identity tables, removed by [ADR 0006](0006-remove-identity.md). Device-identity and pairing entities now occupy that role in PostgreSQL; the split with Redis is unchanged.

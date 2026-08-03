@@ -47,9 +47,9 @@ flowchart TD
 ## Components
 
 - `services/SonicRelay.Api`: Minimal API composition, rate limits, health checks, endpoint handlers, WebSocket signaling and session cleanup.
-- `src/SonicRelay.Domain`: user, device, session, participant and signaling-event models, and (Phase 1 of issue #26) a parallel device-identity credential and pairing model — see `docs/device-identity.md`. `StreamSession.SourceDeviceId` and `SessionParticipant.DeviceId` now reference `DeviceIdentity` rather than `ApplicationUser`/the old `Device` entity (Phase 2 of issue #26); `Device` is no longer part of the session, signaling or TURN path and remains only for its own unrelated, owner-scoped CRUD feature, pending Phase 4 cleanup.
+- `src/SonicRelay.Domain`: device-identity credential/pairing, session, participant and signaling-event models — see `docs/device-identity.md`. `StreamSession.SourceDeviceId` and `SessionParticipant.DeviceId` reference `DeviceIdentity`. ASP.NET Core Identity and the old owner-scoped `Device` entity were removed in Phase 4 of issue #26 (see [ADR 0006](adr/0006-remove-identity.md)); `SonicRelay.Domain.Devices` now only holds the `DeviceTypes`/`DevicePlatforms` constants shared with `DeviceIdentity`.
 - `src/SonicRelay.Application`: abstractions for session-code storage and live connection routing.
-- `src/SonicRelay.Infrastructure`: EF Core/PostgreSQL persistence, Identity stores, Redis session-code storage and the in-memory connection registry.
+- `src/SonicRelay.Infrastructure`: EF Core/PostgreSQL persistence, Redis session-code storage and the in-memory connection registry.
 - `infra`: development and full-stack production Compose definitions, nginx and coturn configuration.
 - `deploy`: API-only production Compose file and SSH deployment script used by GitHub Actions.
 
@@ -57,9 +57,9 @@ The signaling registry is process-local. Multiple API replicas do not share live
 
 ## Primary flow
 
-The current desktop/mobile flow uses durable device credentials and pairing.
-Identity/account endpoints remain a separate, legacy owner-scoped feature pending
-Phase 4 cleanup; they are not used for sessions, signaling, or TURN.
+Each device bootstraps its own persistent credential and exchanges it for a short-lived `DeviceBearer` JWT; there is no human account and no ASP.NET Core Identity. Session creation and join validate the caller's own device identity from its `DeviceBearer` token; nothing about which device is calling is client-asserted.
+
+Device pairing (Publisher issues a pairing challenge/QR, Viewer completes it via `POST /api/pairings/complete`) is how a Viewer discovers and trusts a Publisher's devices, and it **is** a prerequisite for joining a session: `POST /api/sessions/join` requires an active `DevicePairing` between the session's publisher device and the joining device, in addition to a valid join code. A device with a valid `DeviceBearer` but no active pairing with the publisher gets the same "invalid or expired code" response as a bad code, so join never leaks whether a session exists.
 
 ```mermaid
 sequenceDiagram
@@ -91,7 +91,7 @@ sequenceDiagram
     API->>DB: create active DevicePairing
     F->>API: POST /api/sessions/join
     API->>R: resolve code
-    API->>DB: verify active pairing; create viewer participant
+    API->>DB: verify active pairing exists; reject with invalid/expired code if not; else create viewer participant
     API-->>F: session
     F->>API: GET /ws/signaling?sessionId=...
 
@@ -104,34 +104,46 @@ sequenceDiagram
     F-.->TURN: TURN relay fallback
 ```
 
+See [device identity](device-identity.md) for the pairing flow's own sequence.
+
 ## Persistence model
 
 ```mermaid
 erDiagram
-    APPLICATION_USER ||--o{ DEVICE : owns
-    DEVICE ||--o{ STREAM_SESSION : publishes
-    DEVICE ||--o{ SESSION_PARTICIPANT : connects_as
-    DEVICE ||--o{ DEVICE_PAIRING : publisher
-    DEVICE ||--o{ DEVICE_PAIRING : viewer
+    DEVICE_IDENTITY ||--o{ STREAM_SESSION : publishes
+    DEVICE_IDENTITY ||--o{ SESSION_PARTICIPANT : connects_as
+    DEVICE_IDENTITY ||--o{ PAIRING_CHALLENGE : issues
+    DEVICE_IDENTITY ||--o{ DEVICE_PAIRING : publisher_or_viewer
     STREAM_SESSION ||--o{ SESSION_PARTICIPANT : has
     STREAM_SESSION ||--o{ SIGNALING_EVENT : may_log
 
-    APPLICATION_USER {
+    DEVICE_IDENTITY {
         uuid id PK
-        string email
-        string displayName
-        bool isDisabled
-        datetime createdAt
-        datetime lastLoginAt
-    }
-    DEVICE {
-        uuid id PK
-        uuid ownerUserId
         string name
-        string type
+        string deviceType
         string platform
-        bool trusted
-        bool revoked
+        string credentialSecretHash
+        int credentialVersion
+        string status
+        datetime lastSeenAt
+        datetime revokedAt
+    }
+    PAIRING_CHALLENGE {
+        uuid id PK
+        uuid publisherDeviceId
+        string codeHash
+        datetime expiresAt
+        int maxAttempts
+        int attemptCount
+        datetime consumedAt
+    }
+    DEVICE_PAIRING {
+        uuid id PK
+        uuid publisherDeviceId
+        uuid viewerDeviceId
+        string status
+        datetime lastUsedAt
+        datetime revokedAt
     }
     STREAM_SESSION {
         uuid id PK
@@ -163,19 +175,19 @@ erDiagram
     }
 ```
 
-`StreamSession` and `SessionParticipant` are authorized through device identity: a session has a `sourceDeviceId`, and participants have a `deviceId`; neither stores an application-user owner. `DevicePairing` records the durable publisher/viewer relationship required for a new viewer to join a session. The legacy owner-scoped `Device` CRUD feature still retains `ownerUserId` and is separate from session authorization. EF Core maps these tables but does not declare relational foreign-key navigation constraints in `AppDbContext`; ownership and membership checks are enforced by handlers.
+`StreamSession` and `SessionParticipant` are authorized through device identity: a session has a `sourceDeviceId`, and participants have a `deviceId`; neither stores an application-user owner. `DevicePairing` records the durable publisher/viewer relationship, and a viewer must have an active `DevicePairing` with the session's publisher device before `POST /api/sessions/join` will admit it — the legacy owner-scoped `Device` entity and its `ownerUserId` column were removed in Phase 4 (see [ADR 0006](adr/0006-remove-identity.md)), so there is no separate ownership model to reconcile with. EF Core maps these tables but does not declare relational foreign-key navigation constraints in `AppDbContext`; pairing and membership checks are enforced by handlers.
 
 ## Session and peer topology
 
-Devices only see sessions where they are the source or a participant. A publisher is expected to create one peer connection per viewer.
+A device only sees sessions it publishes or participates in. A publisher is expected to create one peer connection per viewer.
 
 ```mermaid
 flowchart LR
-    subgraph A["User A"]
+    subgraph A["Devices A"]
         A_PC["Publisher device"] --> A_SESSION["Session"]
         A_PHONE["Viewer device"] --> A_SESSION
     end
-    subgraph B["User B"]
+    subgraph B["Devices B"]
         B_PC["Publisher device"] --> B_SESSION["Session"]
         B_PHONE["Viewer device"] --> B_SESSION
     end
@@ -196,7 +208,8 @@ flowchart TD
 ## Decision records
 
 - [ADR 0001: Keep media outside the backend](adr/0001-control-plane-only.md)
-- [ADR 0002: Use Identity opaque bearer tokens](adr/0002-identity-bearer-tokens.md)
+- [ADR 0002: Use Identity opaque bearer tokens](adr/0002-identity-bearer-tokens.md) — superseded by ADR 0006
 - [ADR 0003: Split durable and ephemeral storage](adr/0003-postgresql-and-redis-storage.md)
 - [ADR 0004: Use authenticated WebSocket signaling](adr/0004-authenticated-websocket-signaling.md)
 - [ADR 0005: Symmetric device credentials with a parallel DeviceBearer scheme](adr/0005-device-identity-credentials.md) — extended in Phase 2 to sessions, signaling and TURN credential issuance
+- [ADR 0006: Remove ASP.NET Core Identity and owner-scoped Device CRUD](adr/0006-remove-identity.md)
