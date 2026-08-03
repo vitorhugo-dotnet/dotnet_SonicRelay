@@ -29,9 +29,16 @@ The only authentication scheme is `DeviceBearer`:
 - Session creation requires a `session:create`-scoped `DeviceBearer` token; the caller's own authenticated device is always the session's source device.
 - Session reads (`GET /api/sessions/active`, `GET /api/sessions/{id}`) are limited to sessions where the caller's device is the source or a participant and return `404` otherwise.
 - End and code rotation operations require a `session:end`-scoped token and require the caller's device to be the session's source device.
-- Join requires a `session:join`-scoped token and enforces the session viewer limit; the joining device is always the caller's own, never a client-supplied one.
+- Join requires a `session:join`-scoped token, an active `DevicePairing` to the session's source device, and enforces the session viewer limit; the joining device is always the caller's own, never a client-supplied one.
 - WebSocket upgrade requires a `signaling:connect`-scoped token and a matching session participant record for the caller's device.
 - Signaling routing always uses the authenticated participant as `from` and restricts recipients to the same session.
+
+A new viewer participant needs both an active `DevicePairing` to the session's
+source device and the current session join code. The API deliberately returns
+the invalid/expired-code response when either condition is absent, so a
+caller cannot tell a nonexistent session from one it just isn't paired with.
+Existing participants may reconnect after pairing revocation until the
+session ends; revocation only blocks new joins.
 
 The named policies `session:create`, `session:join`, `session:end`, `signaling:connect`, `turn:credentials`, `device:read`, `device:manage`, `pairing:create`, `pairing:complete` and `pairing:revoke` each require a `DeviceBearer` token carrying the matching scope; `DeviceScopeAuthorizationHandler` also re-checks the device's live status and credential version against the database on every request, so revocation and credential rotation take effect immediately. `DeviceAuthenticated` is a scope-less variant of the same check, used by read-only routes that need no capability beyond an active device.
 

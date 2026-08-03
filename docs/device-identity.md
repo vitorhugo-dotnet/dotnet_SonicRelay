@@ -95,6 +95,16 @@ IP address, the same keying (and for the same reason) as
 claim a per-device limiter could key on without making `DeviceBearer` the
 app's default authentication scheme.
 
+## Pairing authorization at session join
+
+`POST /api/sessions/join` requires both an active `DevicePairing` between the
+caller's device and the session's source (publisher) device, and the current
+session join code. If either condition is absent — bad code, expired code, or
+no active pairing — the API returns the same invalid/expired-code response,
+so a caller cannot distinguish "session doesn't exist" from "you're not
+paired with its publisher." Existing participants may reconnect after
+pairing revocation until the session ends; revocation only blocks new joins.
+
 ## Revocation and lifecycle
 
 There is no separate account-deletion or admin user-management surface: a

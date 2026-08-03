@@ -1,6 +1,6 @@
 # HTTP and WebSocket protocol
 
-This document describes routes mapped by the current API. Unless marked public, HTTP requests require `Authorization: Bearer <device-access-token>`, a `DeviceBearer` JWT issued by `POST /api/devices/token` (see [device identity](device-identity.md)). There is no human user account, login or password anywhere in the API.
+This document describes routes mapped by the current API. Unless marked public, HTTP requests require `Authorization: Bearer <DeviceBearer-token>`, a `DeviceBearer` JWT issued by `POST /api/devices/token` (see [device identity](device-identity.md)). There is no human user account, login or password anywhere in the API, and no ASP.NET Core Identity.
 
 ## Health
 
@@ -13,7 +13,17 @@ Swagger is enabled by default only in Development, or when `Swagger:Enabled=true
 
 ## Device identity
 
-Device bootstrap and token exchange are public (no `Authorization` header); everything else requires a `DeviceBearer` access token with the matching scope. See [device identity](device-identity.md) for the full flow, scopes and configuration.
+Bootstrap a publisher or viewer with `POST /api/devices/bootstrap`, then
+exchange its device ID and one-time credential secret at `POST
+/api/devices/token` for a short-lived `DeviceBearer` JWT. Device bootstrap and
+token exchange are public (no `Authorization` header); everything else
+requires a `DeviceBearer` access token with the matching scope. Use that
+token for sessions, WebSocket signaling and TURN credentials. Before a viewer
+can join a publisher's session, the two devices must establish a durable
+pairing through `POST /api/pairings/challenges` and `POST
+/api/pairings/complete` — `POST /api/sessions/join` enforces that an active
+pairing exists. See [device identity](device-identity.md) for the full flow,
+scopes and configuration.
 
 | Method | Route | Auth | Behavior |
 | --- | --- | --- | --- |
@@ -56,7 +66,7 @@ All session routes require a `DeviceBearer` token; the caller's own device (from
 | `GET` | `/api/sessions/{sessionId}` | `DeviceAuthenticated` | Returns a session to its publisher or a participant; inaccessible sessions return `404`. |
 | `POST` | `/api/sessions/{sessionId}/end` | `session:end` | Publisher-only; marks the session ended, disconnects participants and removes the Redis code. Idempotently returns the ended session. |
 | `POST` | `/api/sessions/{sessionId}/rotate-code` | `session:end` | Publisher-only; rejects ended/expired sessions with `409`, invalidates the previous code and returns a new code. |
-| `POST` | `/api/sessions/join` | `session:join` | Resolves a valid code, enforces the viewer limit, creates/reconnects a participant for the caller's device and activates a waiting session. |
+| `POST` | `/api/sessions/join` | `session:join` | Resolves a valid code, enforces the viewer limit, creates/reconnects a participant for the caller's device and activates a waiting session. Also requires an active `DevicePairing` between the caller's device and the session's source device. |
 
 Create request:
 
@@ -72,7 +82,7 @@ Join request:
 { "code": "ABC123" }
 ```
 
-Codes are trimmed, uppercased and must contain exactly six ASCII letters/digits. Wrong, malformed, expired and terminal-session codes all return `404` with the same error. Despite the store method name `RedeemAsync`, a successful lookup does not consume the code; it remains reusable until rotation, session end or expiry.
+Codes are trimmed, uppercased and must contain exactly six ASCII letters/digits. A new viewer participant needs both an active DevicePairing to the session's source device and the current session join code. Wrong, malformed, expired and terminal-session codes, as well as a missing/revoked pairing for a new participant, all return the same `404` invalid/expired-code response. Existing participants may reconnect after pairing revocation until the session ends. Despite the store method name `RedeemAsync`, a successful lookup does not consume a code; it remains reusable until rotation, session end or expiry.
 
 Session responses contain `id`, `sourceDeviceId`, `status`, `maxViewers`, `codeExpiresAt`, `startedAt`, `endedAt`, `createdAt`, and `code` when a new code is issued.
 
@@ -94,7 +104,7 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 
 1. Bootstrap (`POST /api/devices/bootstrap`) and get a token (`POST /api/devices/token`) for a `windows_publisher`/`windows` device.
 2. Crie uma sessão com `POST /api/sessions/` e exiba o código temporário ao usuário.
-3. Abra o WebSocket autenticado usando `sessionId`; o device Publisher é derivado do `DeviceBearer` token.
+3. Abra o WebSocket autenticado usando apenas `sessionId`; a identidade do Publisher vem do token `DeviceBearer`.
 4. Guarde seu `participantId` recebido em `session.joined`. Quando outro `session.joined` anunciar um Viewer, use o `participantId` do payload como destino de `publisher.ready`.
 5. Para cada Viewer, crie uma `RTCPeerConnection`, adicione a faixa de áudio Opus e envie uma `webrtc.offer` direcionada ao `participantId` dele.
 6. Ao receber `webrtc.answer`, aplique o SDP como remote description na conexão daquele Viewer.
@@ -103,8 +113,8 @@ O backend é o **control-plane**: autentica, autoriza, mantém sessões e encami
 
 ### Fluxo do Viewer
 
-1. Bootstrap (`POST /api/devices/bootstrap`) e obtenha um token (`POST /api/devices/token`) para um device `flutter_viewer` (`android` ou `ios`), depois entre com `POST /api/sessions/join`.
-2. Abra o WebSocket autenticado usando o `sessionId` retornado; o device Viewer é derivado do `DeviceBearer` token.
+1. Bootstrap (`POST /api/devices/bootstrap`) e obtenha um token (`POST /api/devices/token`) para um device `flutter_viewer` (`android` ou `ios`), complete o pairing com o Publisher (`POST /api/pairings/complete`), depois entre com `POST /api/sessions/join`.
+2. Abra o WebSocket autenticado usando o `sessionId` retornado; a identidade do Viewer vem do token `DeviceBearer`.
 3. Guarde seu `participantId` recebido em `session.joined`. Ao receber `publisher.ready`, aprenda o ID do Publisher pelo campo autenticado `from` e responda com `viewer.ready` para esse destino.
 4. Ao receber `webrtc.offer`, crie/configure a `RTCPeerConnection` e aplique o SDP como remote description.
 5. Gere a answer, aplique-a localmente e envie `webrtc.answer` ao Publisher.
@@ -117,13 +127,13 @@ Connect with an authenticated WebSocket upgrade:
 
 ```text
 GET /ws/signaling?sessionId={uuid}
-Authorization: Bearer <device-access-token>
+Authorization: Bearer <DeviceBearer-token>
 ```
 
 Before upgrade, the API verifies:
 
-- `sessionId` is a UUID;
-- the caller's `DeviceBearer` token is valid, its device is active and its credential version is current;
+- the `sessionId` query parameter is a UUID;
+- the caller's `DeviceBearer` token is valid, has the required signaling scope, and its device is active with a current credential version;
 - the session exists and is not ended, expired or past `codeExpiresAt`;
 - a participant matches the session and the caller's device.
 
@@ -249,11 +259,11 @@ Configure STUN e TURN/coturn nos clients ao criar a peer connection. Essas crede
 
 ### O que o backend valida
 
-- token de acesso (`DeviceBearer`) e upgrade WebSocket;
-- formato UUID de `sessionId`;
+- token `DeviceBearer` e upgrade WebSocket;
+- formato UUID de `sessionId` (o único parâmetro de consulta do signaling);
 - status ativo e versão de credencial do device autenticado (revogação/rotação têm efeito imediato);
 - existência e estado/validade temporal da sessão;
-- participação do device na sessão;
+- participação do device autenticado na sessão;
 - JSON válido, `type` permitido, limite de 64 KiB e frame textual;
 - presença/formato de `to` e pertencimento do destinatário à mesma sessão;
 - identidade do remetente, derivada do socket autenticado.
@@ -271,7 +281,9 @@ Esse limite é deliberado: o backend coordena peers e trata `payload` como JSON 
 ### Notas de segurança para clients
 
 - Use apenas HTTPS/WSS em produção e valide o certificado do servidor.
-- Armazene access/refresh tokens no armazenamento seguro da plataforma e nunca em logs.
+- Armazene o segredo de credencial persistente do device e os tokens
+  `DeviceBearer` de curta duração no armazenamento seguro da plataforma e
+  nunca em logs.
 - Não registre SDP, ICE candidates, tokens, códigos de sessão nem credenciais TURN; SDP/ICE podem revelar dados de rede e mídia.
 - Aceite mensagens somente pelo socket autenticado e para a sessão/participante esperado, mesmo com a normalização do servidor.
 - Trate `error`, `session.left`, `session.ended`, fechamento do socket e expiração como estados normais e limpe recursos.

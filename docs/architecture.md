@@ -57,7 +57,9 @@ The signaling registry is process-local. Multiple API replicas do not share live
 
 ## Primary flow
 
-Each device bootstraps its own persistent credential and exchanges it for a short-lived `DeviceBearer` JWT; there is no human account. Session creation and join validate the caller's own device identity from its `DeviceBearer` token; nothing about which device is calling is client-asserted. Device pairing (Publisher issues a pairing challenge/QR, Viewer completes it) is a separate, independent flow used to let a Viewer discover and trust a Publisher's devices; it is not a prerequisite for creating or joining a session with a join code.
+Each device bootstraps its own persistent credential and exchanges it for a short-lived `DeviceBearer` JWT; there is no human account and no ASP.NET Core Identity. Session creation and join validate the caller's own device identity from its `DeviceBearer` token; nothing about which device is calling is client-asserted.
+
+Device pairing (Publisher issues a pairing challenge/QR, Viewer completes it via `POST /api/pairings/complete`) is how a Viewer discovers and trusts a Publisher's devices, and it **is** a prerequisite for joining a session: `POST /api/sessions/join` requires an active `DevicePairing` between the session's publisher device and the joining device, in addition to a valid join code. A device with a valid `DeviceBearer` but no active pairing with the publisher gets the same "invalid or expired code" response as a bad code, so join never leaks whether a session exists.
 
 ```mermaid
 sequenceDiagram
@@ -69,23 +71,27 @@ sequenceDiagram
     participant F as Flutter Viewer
     participant TURN as coturn
 
-    W->>API: POST /api/devices/bootstrap
-    API-->>W: deviceId + credential secret
+    W->>API: POST /api/devices/bootstrap (windows_publisher)
+    API-->>W: device ID + one-time credential secret
     W->>API: POST /api/devices/token
-    API-->>W: DeviceBearer access token
+    API-->>W: short-lived DeviceBearer
+    W->>API: POST /api/pairings/challenges
+    API-->>W: pairing code / QR payload
     W->>API: POST /api/sessions
     API->>DB: create session + publisher participant
     API->>R: store HMAC-derived code lookup with TTL
     API-->>W: session + temporary code
     W->>API: GET /ws/signaling?sessionId=...
 
-    F->>API: POST /api/devices/bootstrap
-    API-->>F: deviceId + credential secret
+    F->>API: POST /api/devices/bootstrap (flutter_viewer)
+    API-->>F: device ID + one-time credential secret
     F->>API: POST /api/devices/token
-    API-->>F: DeviceBearer access token
+    API-->>F: short-lived DeviceBearer
+    F->>API: POST /api/pairings/complete (pairing code)
+    API->>DB: create active DevicePairing
     F->>API: POST /api/sessions/join
     API->>R: resolve code
-    API->>DB: create viewer participant
+    API->>DB: verify active pairing exists; reject with invalid/expired code if not; else create viewer participant
     API-->>F: session
     F->>API: GET /ws/signaling?sessionId=...
 
@@ -154,6 +160,12 @@ erDiagram
         string status
         string connectionId
     }
+    DEVICE_PAIRING {
+        uuid id PK
+        uuid publisherDeviceId
+        uuid viewerDeviceId
+        string status
+    }
     SIGNALING_EVENT {
         uuid id PK
         uuid sessionId
@@ -163,7 +175,7 @@ erDiagram
     }
 ```
 
-EF Core maps these tables but does not declare relational foreign-key navigation constraints in `AppDbContext`; ownership and membership checks are enforced by handlers.
+`StreamSession` and `SessionParticipant` are authorized through device identity: a session has a `sourceDeviceId`, and participants have a `deviceId`; neither stores an application-user owner. `DevicePairing` records the durable publisher/viewer relationship, and a viewer must have an active `DevicePairing` with the session's publisher device before `POST /api/sessions/join` will admit it — the legacy owner-scoped `Device` entity and its `ownerUserId` column were removed in Phase 4 (see [ADR 0006](adr/0006-remove-identity.md)), so there is no separate ownership model to reconcile with. EF Core maps these tables but does not declare relational foreign-key navigation constraints in `AppDbContext`; pairing and membership checks are enforced by handlers.
 
 ## Session and peer topology
 
