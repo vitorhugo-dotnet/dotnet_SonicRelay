@@ -76,15 +76,17 @@ The compose service binds to loopback by default. Put nginx, Caddy or another TL
 
 ## Database migration
 
-The application does not call `Database.Migrate()` at startup. Apply migrations as a separate release step using the same PostgreSQL connection before starting a schema-dependent image:
+The application does not call `Database.Migrate()` at startup. Apply migrations as a separate release step using the same PostgreSQL connection before starting a schema-dependent image.
+
+The GitHub Actions workflow (`.github/workflows/vps-ci-cd.yml`) does this automatically on every deploy: it builds a self-contained `dotnet ef migrations bundle`, copies it to the VPS alongside `deploy.sh`, and `deploy.sh` runs it against `ConnectionStrings__Postgres` from `.env` before starting the new image (`run_migrations()`). No manual step is needed for deploys that go through that workflow.
+
+To apply migrations by hand instead (e.g. outside the automated pipeline):
 
 ```bash
 dotnet ef database update \
   --project src/SonicRelay.Infrastructure/SonicRelay.Infrastructure.csproj \
   --startup-project services/SonicRelay.Api/SonicRelay.Api.csproj
 ```
-
-The current GitHub Actions workflow does not run this command on the VPS.
 
 ## Deployment execution
 

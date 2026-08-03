@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Prometheus;
 using SonicRelay.Api.Authorization;
@@ -149,6 +150,25 @@ builder.Services.AddAuthorization(options =>
 });
 
 var app = builder.Build();
+
+// Missing DeviceIdentity secrets otherwise surface only on the first request, as an
+// opaque IDX10703 SymmetricSecurityKey exception deep in JwtBearer's lazy options
+// binding — DeviceBearer is the app's only auth scheme, so every route (including
+// anonymous ones like /api/devices/bootstrap) hits it via UseAuthentication(). Fail
+// loudly at startup instead, naming exactly which configuration key is missing.
+var deviceIdentityOptions = app.Services.GetRequiredService<IOptions<DeviceIdentityOptions>>().Value;
+var missingDeviceIdentityKeys = new[]
+{
+    (nameof(DeviceIdentityOptions.TokenSigningKey), deviceIdentityOptions.TokenSigningKey),
+    (nameof(DeviceIdentityOptions.CredentialHmacKey), deviceIdentityOptions.CredentialHmacKey),
+    (nameof(DeviceIdentityOptions.PairingCodeHmacKey), deviceIdentityOptions.PairingCodeHmacKey),
+}.Where(pair => string.IsNullOrWhiteSpace(pair.Item2)).Select(pair => pair.Item1).ToArray();
+if (missingDeviceIdentityKeys.Length > 0)
+{
+    throw new InvalidOperationException(
+        $"Missing required DeviceIdentity configuration: {string.Join(", ", missingDeviceIdentityKeys)}. " +
+        $"Set the corresponding DeviceIdentity__* environment variable(s) (see docs/deployment-vps-ssh.md).");
+}
 
 if (app.Configuration.GetValue("Swagger:Enabled", app.Environment.IsDevelopment()))
 {
