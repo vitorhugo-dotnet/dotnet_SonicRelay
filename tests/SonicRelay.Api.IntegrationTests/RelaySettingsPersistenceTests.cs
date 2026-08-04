@@ -27,7 +27,7 @@ public sealed class RelaySettingsPersistenceTests
 
         var reloaded = await db.RelaySettings.SingleAsync(x => x.Id == RelaySettings.SingletonId);
         Assert.Equal(RelayModes.ForceRelay, reloaded.RelayMode);
-        Assert.Equal(["turn:relay.example.com:3478?transport=udp"], reloaded.TurnUris);
+        Assert.Equal(["turn:relay.example.com:3478?transport=udp"], reloaded.TurnUris!);
         Assert.Equal("shared-secret", reloaded.TurnStaticAuthSecret);
     }
 
