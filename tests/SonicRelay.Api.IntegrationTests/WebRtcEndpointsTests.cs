@@ -2,7 +2,10 @@ using System.Net;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.DependencyInjection;
 using SonicRelay.Domain.Devices;
+using SonicRelay.Domain.RelaySettings;
+using SonicRelay.Infrastructure.Persistence;
 using Xunit;
 
 namespace SonicRelay.Api.IntegrationTests;
@@ -129,6 +132,65 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var turn = servers[1];
         Assert.Equal(1, turn.GetProperty("urls").GetArrayLength());
         Assert.Equal("turns:turn.example.com:5349?transport=tcp", turn.GetProperty("urls")[0].GetString());
+    }
+
+    [Fact]
+    public async Task Ice_servers_omits_turn_when_relay_mode_is_disable_fallback()
+    {
+        const string secret = "disable-fallback-secret";
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Turn:StaticAuthSecret"] = secret,
+            ["Turn:TurnUris:0"] = "turn:relay.example.com:3478?transport=udp"
+        });
+        var (client, _) = await BootstrapAsync(factory);
+        await SeedRelaySettingsAsync(factory, RelayModes.DisableFallback);
+
+        var body = await GetIceServersAsync(client);
+
+        var servers = body.GetProperty("iceServers").EnumerateArray().ToList();
+        Assert.All(servers, entry =>
+            Assert.False(entry.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal)));
+    }
+
+    [Fact]
+    public async Task Ice_servers_uses_the_overridden_turn_uri_and_secret_when_present()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Turn:StaticAuthSecret"] = "appsettings-secret",
+            ["Turn:TurnUris:0"] = "turn:appsettings.example.com:3478?transport=udp"
+        });
+        var (client, deviceId) = await BootstrapAsync(factory);
+        const string overrideSecret = "override-secret";
+        const string overrideUri = "turn:override.example.com:3478?transport=udp";
+        await SeedRelaySettingsAsync(factory, RelayModes.Automatic, [overrideUri], overrideSecret);
+
+        var body = await GetIceServersAsync(client);
+
+        var turn = body.GetProperty("iceServers").EnumerateArray()
+            .Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal));
+        Assert.Equal(overrideUri, turn.GetProperty("urls")[0].GetString());
+        var username = turn.GetProperty("username").GetString()!;
+        var expected = Convert.ToBase64String(HMACSHA1.HashData(
+            Encoding.UTF8.GetBytes(overrideSecret), Encoding.UTF8.GetBytes(username)));
+        Assert.Equal(expected, turn.GetProperty("credential").GetString());
+    }
+
+    private static async Task SeedRelaySettingsAsync(
+        SonicRelayApiFactory factory, string relayMode, string[]? turnUris = null, string? turnSecret = null)
+    {
+        using var scope = factory.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        db.RelaySettings.Add(new RelaySettings
+        {
+            Id = RelaySettings.SingletonId,
+            RelayMode = relayMode,
+            TurnUris = turnUris,
+            TurnStaticAuthSecret = turnSecret,
+            UpdatedAt = DateTimeOffset.UtcNow
+        });
+        await db.SaveChangesAsync();
     }
 
     private static async Task<JsonElement> GetIceServersAsync(HttpClient client)

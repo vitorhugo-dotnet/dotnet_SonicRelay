@@ -26,7 +26,7 @@ builder.Services.AddSwaggerGen();
 builder.Services.AddSonicRelayInfrastructure(builder.Configuration);
 builder.Services.AddSingleton<SonicRelay.Api.Observability.SonicRelayMetrics>();
 builder.Services.TryAddSingleton(TimeProvider.System);
-builder.Services.AddSingleton<TurnCredentialService>();
+builder.Services.AddScoped<TurnCredentialService>();
 builder.Services.Configure<TurnOptions>(builder.Configuration.GetSection("Turn"));
 // The deploy .env feeds coturn with flat variable names; accept those as a
 // fallback so one .env configures both containers without duplication.
