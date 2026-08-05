@@ -527,6 +527,78 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.DoesNotContain(body.EnumerateArray(), x => x.GetProperty("sessionId").GetGuid() == sessionId);
     }
 
+    [Fact]
+    public async Task Join_by_id_admits_an_actively_paired_viewer()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), viewerDeviceId);
+
+        var response = await viewerClient.PostAsync($"/api/sessions/{sessionId}/join", null);
+        var body = await ReadJsonAsync(response);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        Assert.Equal(sessionId, body.GetProperty("id").GetGuid());
+        Assert.Equal(SessionStatuses.Active, body.GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Join_by_id_rejects_an_unpaired_viewer()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (viewerClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+
+        var response = await viewerClient.PostAsync($"/api/sessions/{sessionId}/join", null);
+
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal("not_paired", (await ReadJsonAsync(response)).GetProperty("code").GetString());
+    }
+
+    [Fact]
+    public async Task Join_by_id_is_idempotent_for_an_existing_participant()
+    {
+        var (_, sessionId, code) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), viewerDeviceId);
+        await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
+
+        var response = await viewerClient.PostAsync($"/api/sessions/{sessionId}/join", null);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        await using var scope = _factory.Services.CreateAsyncScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Single(await db.SessionParticipants
+            .Where(x => x.SessionId == sessionId && x.DeviceId == viewerDeviceId && x.Role == ParticipantRoles.Viewer)
+            .ToListAsync());
+    }
+
+    [Fact]
+    public async Task Join_by_id_enforces_the_viewer_limit()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync(maxViewers: 1);
+        var publisherId = await GetPublisherDeviceIdAsync(sessionId);
+        var (firstClient, firstViewerId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        var (secondClient, secondViewerId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(publisherId, firstViewerId);
+        await PairDevicesAsync(publisherId, secondViewerId);
+        Assert.Equal(HttpStatusCode.OK, (await firstClient.PostAsync($"/api/sessions/{sessionId}/join", null)).StatusCode);
+
+        var response = await secondClient.PostAsync($"/api/sessions/{sessionId}/join", null);
+
+        Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Join_by_id_rejects_an_unknown_session()
+    {
+        var (viewerClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+
+        var response = await viewerClient.PostAsync($"/api/sessions/{Guid.NewGuid()}/join", null);
+
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        Assert.Equal("invalid_code", (await ReadJsonAsync(response)).GetProperty("code").GetString());
+    }
+
     private async Task<(HttpClient Client, Guid DeviceId)> BootstrapAsync(string deviceType, string platform,
         SonicRelayApiFactory? factory = null)
     {

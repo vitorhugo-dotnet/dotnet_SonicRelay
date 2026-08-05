@@ -22,6 +22,7 @@ public static class SessionEndpoints
         group.MapPost("/{sessionId:guid}/end", EndAsync).RequireAuthorization("session:end");
         group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync).RequireAuthorization("session:end").RequireRateLimiting("rotate-code");
         group.MapPost("/join", JoinAsync).RequireAuthorization("session:join").RequireRateLimiting("join-session");
+        group.MapPost("/{sessionId:guid}/join", JoinByIdAsync).RequireAuthorization("session:join").RequireRateLimiting("join-session");
         return app;
     }
 
@@ -213,6 +214,35 @@ public static class SessionEndpoints
             return InvalidCode();
         }
 
+        return await AdmitViewerAsync(session, device, db, loggerFactory, ct);
+    }
+
+    // Code-free join for a session the caller found through /discoverable. It runs exactly the
+    // checks the code path runs after redemption; the active pairing is the authorization.
+    // A session the caller cannot see is reported as invalid_code rather than not_paired, so
+    // this endpoint cannot be used to probe which session ids exist.
+    private static async Task<IResult> JoinByIdAsync(Guid sessionId, ClaimsPrincipal principal, AppDbContext db,
+        ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+
+        var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId, ct);
+        if (session is null || session.Status is SessionStatuses.Ended or SessionStatuses.Expired)
+            return InvalidCode();
+
+        return await AdmitViewerAsync(session, device, db, loggerFactory, ct);
+    }
+
+    // Shared by both join paths (code and session id): everything that happens once a live
+    // session has been resolved. Keeping it in one place is what stops the two entry points
+    // from drifting on pairing, viewer-limit or reconnect semantics.
+    private static async Task<IResult> AdmitViewerAsync(StreamSession session, DeviceIdentity device,
+        AppDbContext db, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var logger = loggerFactory.CreateLogger("SonicRelay.Sessions");
+
         var existing = await db.SessionParticipants.SingleOrDefaultAsync(x => x.SessionId == session.Id
             && x.DeviceId == device.Id && x.Role == ParticipantRoles.Viewer, ct);
         if (existing is not null)
@@ -220,7 +250,7 @@ public static class SessionEndpoints
             existing.Status = ParticipantStatuses.Connected;
             existing.LeftAt = null;
             await db.SaveChangesAsync(ct);
-            loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+            logger.LogInformation(
                 "Reconnected participant {ParticipantId} to session {SessionId} from device {DeviceId}",
                 existing.Id, session.Id, device.Id);
             return Results.Ok(ToResponse(session));
@@ -253,7 +283,7 @@ public static class SessionEndpoints
             session.StartedAt = now;
         }
         await db.SaveChangesAsync(ct);
-        loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+        logger.LogInformation(
             "Joined session {SessionId} as participant {ParticipantId} from device {DeviceId}",
             session.Id, participant.Id, device.Id);
         return Results.Ok(ToResponse(session));
