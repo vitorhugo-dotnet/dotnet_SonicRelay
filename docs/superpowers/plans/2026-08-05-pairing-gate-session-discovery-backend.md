@@ -45,46 +45,36 @@ shared table and its endpoints go away entirely. Production is unaffected:
 
 - [ ] **Step 1: Write the failing test**
 
-`RelaySettings` is referenced by the test project, so start by proving
-ice-servers works with no database row involved. Add to
-`tests/SonicRelay.Api.IntegrationTests/WebRtcEndpointsTests.cs` (create the
-file if it does not exist, with the same `IClassFixture` shape as
-`SessionEndpointsTests`):
+`tests/SonicRelay.Api.IntegrationTests/WebRtcEndpointsTests.cs` already exists
+with nine tests and an `IClassFixture<SonicRelayApiFactory>` shape. Keep the
+file, its private helpers (`BootstrapAsync`, `GetIceServersAsync`,
+`TryGetNonNull`) and these six tests untouched — every one is driven purely by
+`Turn:*`/`TURN_*` configuration and never touched `RelaySettings`, so they all
+still describe behaviour that must keep working:
+
+- `Ice_servers_requires_authentication`
+- `Ice_servers_returns_stun_only_when_turn_is_not_configured`
+- `Ice_servers_returns_turn_entry_with_coturn_rest_credentials`
+- `Ice_servers_accepts_flat_environment_style_configuration`
+- `Ice_servers_derives_turn_and_stun_uris_from_the_public_host`
+- `Ice_servers_prefers_explicit_turn_uris_over_the_derived_ones`
+
+`Ice_servers_derives_turn_and_stun_uris_from_the_public_host` matters most:
+`TURN_PUBLIC_HOST` derivation is this deployment's real production path, and
+after this task it is the only path. Do not drop its coverage in the same
+commit that removes the alternative.
+
+Delete only these three, which exercise the removed feature:
+
+- `Ice_servers_omits_turn_when_relay_mode_is_disable_fallback`
+- `Ice_servers_uses_the_overridden_turn_uri_and_secret_when_present`
+- `Put_relay_settings_via_http_is_reflected_end_to_end_in_ice_servers`
+
+Drop the `using SonicRelay.Domain.RelaySettings;` and
+`using SonicRelay.Infrastructure.Persistence;` imports that only those three
+needed. Then add one test proving the endpoint is gone:
 
 ```csharp
-using System.Net;
-using System.Net.Http.Json;
-using System.Text.Json;
-using SonicRelay.Domain.DeviceIdentities;
-using SonicRelay.Domain.Devices;
-using Xunit;
-
-namespace SonicRelay.Api.IntegrationTests;
-
-public sealed class WebRtcEndpointsTests
-{
-    [Fact]
-    public async Task Ice_servers_derives_turn_from_configuration_without_any_database_row()
-    {
-        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
-        {
-            ["Turn:StaticAuthSecret"] = "plan-test-secret",
-            ["Turn:TurnUris:0"] = "turn:relay.example.com:3478?transport=udp"
-        });
-        var client = factory.CreateClient();
-        await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(
-            client, DeviceTypes.FlutterViewer, DevicePlatforms.Android);
-
-        var response = await client.GetAsync("/api/webrtc/ice-servers");
-        var body = await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
-
-        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        var turn = body.RootElement.GetProperty("iceServers").EnumerateArray()
-            .Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal));
-        Assert.Equal("turn:relay.example.com:3478?transport=udp", turn.GetProperty("urls")[0].GetString());
-        Assert.False(string.IsNullOrWhiteSpace(turn.GetProperty("credential").GetString()));
-    }
-
     [Fact]
     public async Task Relay_settings_endpoint_is_gone()
     {
@@ -97,13 +87,16 @@ public sealed class WebRtcEndpointsTests
 
         Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
-}
 ```
+
+`tests/SonicRelay.Api.IntegrationTests/SettingsEndpointsTests.cs` also exists
+and exercises the removed endpoint directly. Delete that whole file.
 
 - [ ] **Step 2: Run the tests to verify they fail**
 
 Run: `dotnet test SonicRelay.sln --filter FullyQualifiedName~WebRtcEndpointsTests`
 Expected: `Relay_settings_endpoint_is_gone` FAILS (the endpoint still answers `200`).
+The six retained tests still pass.
 
 - [ ] **Step 3: Delete the relay settings feature**
 
