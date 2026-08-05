@@ -76,7 +76,7 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
-    public async Task Join_hides_absent_pairing_like_an_invalid_code()
+    public async Task Join_rejects_an_unpaired_viewer_with_a_distinguishable_reason()
     {
         var (_, _, code) = await CreateSessionAsync();
         var (viewerClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
@@ -84,9 +84,10 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var unpaired = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
         var invalid = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code = "ZZZZZZ" });
 
-        Assert.Equal(HttpStatusCode.NotFound, unpaired.StatusCode);
-        Assert.Equal(invalid.StatusCode, unpaired.StatusCode);
-        Assert.Equal(await invalid.Content.ReadAsStringAsync(), await unpaired.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Forbidden, unpaired.StatusCode);
+        Assert.Equal("not_paired", (await ReadJsonAsync(unpaired)).GetProperty("code").GetString());
+        Assert.Equal(HttpStatusCode.NotFound, invalid.StatusCode);
+        Assert.Equal("invalid_code", (await ReadJsonAsync(invalid)).GetProperty("code").GetString());
     }
 
     [Fact]
@@ -98,11 +99,9 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         await PairDevicesAsync(otherPublisherId, viewerDeviceId);
 
         var response = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
-        var invalid = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code = "ZZZZZZ" });
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        Assert.Equal(invalid.StatusCode, response.StatusCode);
-        Assert.Equal(await invalid.Content.ReadAsStringAsync(), await response.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal("not_paired", (await ReadJsonAsync(response)).GetProperty("code").GetString());
     }
 
     [Fact]
@@ -113,11 +112,9 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), viewerDeviceId, DevicePairingStatuses.Revoked);
 
         var response = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code });
-        var invalid = await viewerClient.PostAsJsonAsync("/api/sessions/join", new { code = "ZZZZZZ" });
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
-        Assert.Equal(invalid.StatusCode, response.StatusCode);
-        Assert.Equal(await invalid.Content.ReadAsStringAsync(), await response.Content.ReadAsStringAsync());
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+        Assert.Equal("not_paired", (await ReadJsonAsync(response)).GetProperty("code").GetString());
     }
 
     [Fact]
@@ -131,7 +128,7 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         var unpaired = await unpairedClient.PostAsJsonAsync("/api/sessions/join", new { code });
         var paired = await pairedClient.PostAsJsonAsync("/api/sessions/join", new { code });
 
-        Assert.Equal(HttpStatusCode.NotFound, unpaired.StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, unpaired.StatusCode);
         Assert.Equal(HttpStatusCode.OK, paired.StatusCode);
     }
 

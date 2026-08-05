@@ -192,7 +192,7 @@ public static class SessionEndpoints
         }
 
         if (!await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
-            return InvalidCode();
+            return NotPaired();
 
         // Viewers mid-reconnect-grace-period still hold their slot, otherwise a new viewer
         // could take it during the grace window and leave a maxViewers=1 session with two
@@ -224,7 +224,15 @@ public static class SessionEndpoints
         return Results.Ok(ToResponse(session));
     }
 
-    private static IResult InvalidCode() => Results.NotFound(new { error = "Invalid or expired session code." });
+    private static IResult InvalidCode() =>
+        Results.NotFound(new { error = "Invalid or expired session code.", code = "invalid_code" });
+
+    private static IResult NotPaired() =>
+        Results.Json(new
+        {
+            error = "This device is not paired with the publisher of that session.",
+            code = "not_paired"
+        }, statusCode: StatusCodes.Status403Forbidden);
 
     private static Task<bool> HasActivePairingAsync(AppDbContext db,
         Guid publisherId, Guid viewerId, CancellationToken ct) =>
