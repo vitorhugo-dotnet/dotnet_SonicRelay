@@ -92,6 +92,7 @@ Current limitation: successful join lookup does not consume a code. A code can b
 - Device ownership and lifecycle are enforced by handlers; policy names alone do not express those resource checks.
 - There is no CORS configuration. Browser-based clients need an explicit allowlist before use.
 - There is no admin UI/API for device management beyond a device's own rotate/revoke endpoints; a human operator cannot remotely revoke another device's credential. Issue #26 explicitly scopes a human-user admin panel out of this project.
+- `PUT /api/settings/relay` is the one exception to the "devices only manage themselves" rule above: it requires only `device:manage`, but the row it mutates is global relay/coturn configuration shared by every device, not the caller's own device. Any bootstrapped device (bootstrap is anonymous and only IP-rate-limited) can toggle `disableFallback` for every other device or point every other device's TURN traffic at attacker-controlled infrastructure. This is accepted for the current single-operator, self-hosted deployment model (there is no admin/account tier to scope it to) and should be revisited if this backend ever serves multiple independent operators/accounts.
 - The live signaling registry is in memory, preventing safe multi-replica routing without sticky sessions or a backplane.
 - TURN uses static configuration; temporary per-session TURN credentials are not issued by the API.
 - The API-only CI deployment does not provision PostgreSQL, Redis, coturn, TLS or backups.
