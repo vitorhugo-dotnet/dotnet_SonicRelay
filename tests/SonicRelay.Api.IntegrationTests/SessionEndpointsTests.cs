@@ -469,6 +469,64 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
         Assert.NotNull(participant.LeftAt);
     }
 
+    [Fact]
+    public async Task Discoverable_lists_waiting_sessions_of_actively_paired_publishers()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), viewerDeviceId);
+
+        var response = await viewerClient.GetAsync("/api/sessions/discoverable");
+        var body = await ReadJsonAsync(response);
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var entry = body.EnumerateArray().Single(x => x.GetProperty("sessionId").GetGuid() == sessionId);
+        Assert.Equal(SessionStatuses.Waiting, entry.GetProperty("status").GetString());
+        Assert.Equal(0, entry.GetProperty("viewerCount").GetInt32());
+        Assert.False(string.IsNullOrWhiteSpace(entry.GetProperty("publisherDeviceName").GetString()));
+    }
+
+    [Fact]
+    public async Task Discoverable_never_exposes_the_join_code()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), viewerDeviceId);
+
+        var response = await viewerClient.GetAsync("/api/sessions/discoverable");
+        var entry = (await ReadJsonAsync(response)).EnumerateArray().Single();
+
+        Assert.False(entry.TryGetProperty("code", out _));
+    }
+
+    [Fact]
+    public async Task Discoverable_excludes_unpaired_and_revoked_publishers()
+    {
+        var (_, sessionId, _) = await CreateSessionAsync();
+        var (unpairedClient, _) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        var (revokedClient, revokedViewerId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), revokedViewerId, DevicePairingStatuses.Revoked);
+
+        var unpaired = await ReadJsonAsync(await unpairedClient.GetAsync("/api/sessions/discoverable"));
+        var revoked = await ReadJsonAsync(await revokedClient.GetAsync("/api/sessions/discoverable"));
+
+        Assert.Empty(unpaired.EnumerateArray());
+        Assert.Empty(revoked.EnumerateArray());
+    }
+
+    [Fact]
+    public async Task Discoverable_excludes_ended_sessions()
+    {
+        var (ownerClient, sessionId, _) = await CreateSessionAsync();
+        var (viewerClient, viewerDeviceId) = await BootstrapAsync(DeviceTypes.FlutterViewer, DevicePlatforms.Android);
+        await PairDevicesAsync(await GetPublisherDeviceIdAsync(sessionId), viewerDeviceId);
+        await ownerClient.PostAsync($"/api/sessions/{sessionId}/end", null);
+
+        var body = await ReadJsonAsync(await viewerClient.GetAsync("/api/sessions/discoverable"));
+
+        Assert.DoesNotContain(body.EnumerateArray(), x => x.GetProperty("sessionId").GetGuid() == sessionId);
+    }
+
     private async Task<(HttpClient Client, Guid DeviceId)> BootstrapAsync(string deviceType, string platform,
         SonicRelayApiFactory? factory = null)
     {

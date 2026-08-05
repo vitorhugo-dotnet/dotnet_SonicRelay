@@ -17,6 +17,7 @@ public static class SessionEndpoints
         var group = app.MapGroup("/api/sessions").WithTags("Sessions");
         group.MapPost("/", CreateAsync).RequireAuthorization("session:create").RequireRateLimiting("create-session");
         group.MapGet("/active", GetActiveAsync).RequireAuthorization("DeviceAuthenticated");
+        group.MapGet("/discoverable", GetDiscoverableAsync).RequireAuthorization("session:join");
         group.MapGet("/{sessionId:guid}", GetAsync).RequireAuthorization("DeviceAuthenticated");
         group.MapPost("/{sessionId:guid}/end", EndAsync).RequireAuthorization("session:end");
         group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync).RequireAuthorization("session:end").RequireRateLimiting("rotate-code");
@@ -83,6 +84,40 @@ public static class SessionEndpoints
                 ViewerCount = db.SessionParticipants.Count(p => p.SessionId == x.Id && p.Role == ParticipantRoles.Viewer
                     && p.Status == ParticipantStatuses.Connected)
             }).ToListAsync(ct);
+        return Results.Ok(sessions);
+    }
+
+    // Sessions a paired viewer is allowed to join without a code. The pairing is the
+    // authorization; the join code only ever proved the viewer could read the publisher's
+    // screen, which an active pairing establishes more strongly. No code is projected here
+    // — it is a separate short-lived secret and discovery must not become a way to read it.
+    private static async Task<IResult> GetDiscoverableAsync(ClaimsPrincipal principal, AppDbContext db,
+        CancellationToken ct)
+    {
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+
+        var sessions = await db.StreamSessions.AsNoTracking()
+            .Where(x => (x.Status == SessionStatuses.Waiting || x.Status == SessionStatuses.Active)
+                && db.DevicePairings.Any(p => p.PublisherDeviceId == x.SourceDeviceId
+                    && p.ViewerDeviceId == device.Id
+                    && p.Status == DevicePairingStatuses.Active))
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(x => new
+            {
+                SessionId = x.Id,
+                PublisherDeviceId = x.SourceDeviceId,
+                PublisherDeviceName = db.DeviceIdentities
+                    .Where(d => d.Id == x.SourceDeviceId).Select(d => d.Name).FirstOrDefault(),
+                x.Status,
+                x.MaxViewers,
+                x.CreatedAt,
+                ViewerCount = db.SessionParticipants.Count(p => p.SessionId == x.Id
+                    && p.Role == ParticipantRoles.Viewer
+                    && p.Status == ParticipantStatuses.Connected)
+            })
+            .ToListAsync(ct);
+
         return Results.Ok(sessions);
     }
 
