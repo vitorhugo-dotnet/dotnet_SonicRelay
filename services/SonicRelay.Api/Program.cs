@@ -190,6 +190,7 @@ app.MapDeviceIdentityEndpoints();
 app.MapPairingEndpoints();
 app.MapSessionEndpoints();
 app.MapWebRtcEndpoints();
+app.MapSettingsEndpoints();
 app.MapSignalingWebSocketEndpoint();
 
 app.Run();

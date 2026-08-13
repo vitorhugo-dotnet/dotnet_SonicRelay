@@ -24,7 +24,8 @@ public static class WebRtcEndpoints
     {
         var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
         if (device is null) return Results.Unauthorized();
-        return Results.Ok(await credentials.BuildAsync(device.Id.ToString("D"), ct));
+        var relayOverride = await SettingsEndpoints.ResolveEffectiveAsync(db, device.Id, ct);
+        return Results.Ok(await credentials.BuildAsync(device.Id.ToString("D"), relayOverride, ct));
     }
 
     private static async Task<IResult> ReportStatsAsync(

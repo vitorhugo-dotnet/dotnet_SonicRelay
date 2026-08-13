@@ -56,8 +56,9 @@ public static class SignalingWebSocketEndpoint
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return;
         }
-        if (session.Status is SessionStatuses.Ended or SessionStatuses.Expired
-            || session.CodeExpiresAt <= DateTimeOffset.UtcNow)
+        // Code expiry only gates *new joins*; an established session stays alive until it is
+        // ended or expired, so a publisher streaming past the code TTL is not cut off.
+        if (session.Status is SessionStatuses.Ended or SessionStatuses.Expired)
         {
             logger.LogInformation("Rejected signaling connection to terminal session {SessionId} with status {SessionStatus}",
                 sessionId, session.Status);
@@ -315,11 +316,10 @@ public static class SignalingWebSocketEndpoint
     {
         var state = await db.StreamSessions.AsNoTracking()
             .Where(x => x.Id == sessionId)
-            .Select(x => new { x.Status, x.CodeExpiresAt })
+            .Select(x => new { x.Status })
             .SingleOrDefaultAsync(ct);
         return state is null
-            || state.Status is SessionStatuses.Ended or SessionStatuses.Expired
-            || state.CodeExpiresAt <= DateTimeOffset.UtcNow;
+            || state.Status is SessionStatuses.Ended or SessionStatuses.Expired;
     }
 
     private static async Task MarkReconnectingAsync(AppDbContext db, Guid participantId, string connectionId)

@@ -203,7 +203,9 @@ public static class SessionEndpoints
         if (session is null || session.CodeExpiresAt <= now
             || session.Status is SessionStatuses.Ended or SessionStatuses.Expired)
         {
-            if (session is not null && session.CodeExpiresAt <= now && session.Status != SessionStatuses.Ended)
+            // Only a session still waiting for its first viewer dies with its code; an active
+            // session outlives the code (the stale code just stops admitting new viewers).
+            if (session is not null && session.CodeExpiresAt <= now && session.Status == SessionStatuses.Waiting)
             {
                 session.Status = SessionStatuses.Expired;
                 await db.SaveChangesAsync(ct);

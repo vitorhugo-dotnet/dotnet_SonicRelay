@@ -12,10 +12,11 @@ public sealed class PairingManagementTests : IClassFixture<SonicRelayApiFactory>
 
     public PairingManagementTests(SonicRelayApiFactory factory) => _client = factory.CreateClient();
 
-    private async Task<(Guid DeviceId, string AccessToken)> BootstrapAndAuthenticateAsync(string type, string platform)
+    private async Task<(Guid DeviceId, string AccessToken)> BootstrapAndAuthenticateAsync(string type, string platform,
+        string name = "Device")
     {
         var bootstrap = await (await _client.PostAsJsonAsync("/api/devices/bootstrap",
-            new BootstrapDeviceRequest("Device", type, platform)))
+            new BootstrapDeviceRequest(name, type, platform)))
             .Content.ReadFromJsonAsync<BootstrapDeviceResponse>();
         var token = await (await _client.PostAsJsonAsync("/api/devices/token",
             new DeviceTokenRequest(bootstrap!.DeviceId, bootstrap.CredentialSecret)))
@@ -62,6 +63,23 @@ public sealed class PairingManagementTests : IClassFixture<SonicRelayApiFactory>
         Assert.Single(pairings!);
         Assert.Equal(publisherA.DeviceId, pairings![0].PublisherDeviceId);
         Assert.Equal(viewerA.DeviceId, pairings[0].ViewerDeviceId);
+    }
+
+    [Fact]
+    public async Task List_And_Complete_Return_The_Device_Names_Of_Both_Sides()
+    {
+        var publisher = await BootstrapAndAuthenticateAsync("windows_publisher", "windows", "JCPC38");
+        var viewer = await BootstrapAndAuthenticateAsync("flutter_viewer", "android", "Vitor's phone");
+
+        var completed = await PairAsync(publisher, viewer);
+        Assert.Equal("JCPC38", completed.PublisherDeviceName);
+        Assert.Equal("Vitor's phone", completed.ViewerDeviceName);
+
+        var publisherList = await (await _client.SendAsync(Authorized(
+            HttpMethod.Get, $"/api/devices/{publisher.DeviceId}/pairings", publisher.AccessToken)))
+            .Content.ReadFromJsonAsync<List<PairingResponse>>();
+        Assert.Equal("Vitor's phone", publisherList![0].ViewerDeviceName);
+        Assert.Equal("JCPC38", publisherList[0].PublisherDeviceName);
     }
 
     [Fact]

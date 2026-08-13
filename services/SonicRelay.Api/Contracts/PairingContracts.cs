@@ -6,4 +6,5 @@ public sealed record CompletePairingRequest(Guid ChallengeId, string Code);
 
 public sealed record PairingResponse(
     Guid PairingId, Guid PublisherDeviceId, Guid ViewerDeviceId, string Status,
-    DateTimeOffset CreatedAt, DateTimeOffset? LastUsedAt);
+    DateTimeOffset CreatedAt, DateTimeOffset? LastUsedAt,
+    string PublisherDeviceName, string ViewerDeviceName);
