@@ -1,6 +1,5 @@
 using Microsoft.EntityFrameworkCore;
 using SonicRelay.Domain.DeviceIdentities;
-using SonicRelay.Domain.RelaySettings;
 using SonicRelay.Domain.Sessions;
 using SonicRelay.Domain.Signaling;
 
@@ -14,7 +13,6 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
     public DbSet<DeviceIdentity> DeviceIdentities => Set<DeviceIdentity>();
     public DbSet<PairingChallenge> PairingChallenges => Set<PairingChallenge>();
     public DbSet<DevicePairing> DevicePairings => Set<DevicePairing>();
-    public DbSet<RelaySettings> RelaySettings => Set<RelaySettings>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -73,13 +71,6 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Status).HasMaxLength(16).IsRequired();
             entity.HasIndex(x => x.PublisherDeviceId).HasDatabaseName("ix_device_pairings_publisher_device_id");
             entity.HasIndex(x => x.ViewerDeviceId).HasDatabaseName("ix_device_pairings_viewer_device_id");
-        });
-
-        modelBuilder.Entity<RelaySettings>(entity =>
-        {
-            entity.ToTable("relay_settings");
-            entity.HasKey(x => x.Id);
-            entity.Property(x => x.RelayMode).HasMaxLength(20).IsRequired();
         });
     }
 }

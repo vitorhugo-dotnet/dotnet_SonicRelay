@@ -3,11 +3,7 @@ using System.Net.Http.Json;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Extensions.DependencyInjection;
-using SonicRelay.Api.Contracts;
 using SonicRelay.Domain.Devices;
-using SonicRelay.Domain.RelaySettings;
-using SonicRelay.Infrastructure.Persistence;
 using Xunit;
 
 namespace SonicRelay.Api.IntegrationTests;
@@ -137,106 +133,16 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
-    public async Task Ice_servers_omits_turn_when_relay_mode_is_disable_fallback()
+    public async Task Relay_settings_endpoint_is_gone()
     {
-        const string secret = "disable-fallback-secret";
-        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
-        {
-            ["Turn:StaticAuthSecret"] = secret,
-            ["Turn:TurnUris:0"] = "turn:relay.example.com:3478?transport=udp"
-        });
-        var (client, _) = await BootstrapAsync(factory);
-        await SeedRelaySettingsAsync(factory, RelayModes.DisableFallback);
+        await using var factory = new SonicRelayApiFactory();
+        var client = factory.CreateClient();
+        await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(
+            client, DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
 
-        var body = await GetIceServersAsync(client);
+        var response = await client.GetAsync("/api/settings/relay");
 
-        var servers = body.GetProperty("iceServers").EnumerateArray().ToList();
-        var entry = Assert.Single(servers);
-        Assert.Equal("stun:stun.l.google.com:19302", entry.GetProperty("urls")[0].GetString());
-        Assert.False(TryGetNonNull(entry, "username", out _));
-        Assert.False(TryGetNonNull(entry, "credential", out _));
-    }
-
-    [Fact]
-    public async Task Ice_servers_uses_the_overridden_turn_uri_and_secret_when_present()
-    {
-        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
-        {
-            ["Turn:StaticAuthSecret"] = "appsettings-secret",
-            ["Turn:TurnUris:0"] = "turn:appsettings.example.com:3478?transport=udp"
-        });
-        var (client, deviceId) = await BootstrapAsync(factory);
-        const string overrideSecret = "override-secret";
-        const string overrideUri = "turn:override.example.com:3478?transport=udp";
-        await SeedRelaySettingsAsync(factory, RelayModes.Automatic, [overrideUri], overrideSecret);
-
-        var body = await GetIceServersAsync(client);
-
-        var turn = body.GetProperty("iceServers").EnumerateArray()
-            .Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal));
-        Assert.Equal(overrideUri, turn.GetProperty("urls")[0].GetString());
-        var username = turn.GetProperty("username").GetString()!;
-        var expected = Convert.ToBase64String(HMACSHA1.HashData(
-            Encoding.UTF8.GetBytes(overrideSecret), Encoding.UTF8.GetBytes(username)));
-        Assert.Equal(expected, turn.GetProperty("credential").GetString());
-    }
-
-    [Fact]
-    public async Task Put_relay_settings_via_http_is_reflected_end_to_end_in_ice_servers()
-    {
-        const string secret = "seam-secret";
-        const string turnUri = "turn:seam.example.com:3478?transport=udp";
-        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
-        {
-            ["Turn:StaticAuthSecret"] = secret,
-            ["Turn:TurnUris:0"] = turnUri
-        });
-        var (client, deviceId) = await BootstrapAsync(factory);
-
-        var disableResponse = await client.PutAsJsonAsync("/api/settings/relay",
-            new UpdateRelaySettingsRequest(RelayModes.DisableFallback, null, null));
-        disableResponse.EnsureSuccessStatusCode();
-
-        var disabledBody = await GetIceServersAsync(client);
-        var disabledServers = disabledBody.GetProperty("iceServers").EnumerateArray().ToList();
-        var stunOnly = Assert.Single(disabledServers);
-        Assert.Equal("stun:stun.l.google.com:19302", stunOnly.GetProperty("urls")[0].GetString());
-        Assert.False(TryGetNonNull(stunOnly, "username", out _));
-        Assert.False(TryGetNonNull(stunOnly, "credential", out _));
-
-        var automaticResponse = await client.PutAsJsonAsync("/api/settings/relay",
-            new UpdateRelaySettingsRequest(RelayModes.Automatic, null, null));
-        automaticResponse.EnsureSuccessStatusCode();
-
-        var automaticBody = await GetIceServersAsync(client);
-        var servers = automaticBody.GetProperty("iceServers").EnumerateArray().ToList();
-        Assert.Equal(2, servers.Count);
-        var turn = servers.Single(item =>
-            item.GetProperty("urls")[0].GetString()!.StartsWith("turn:", StringComparison.Ordinal));
-        Assert.Equal(turnUri, turn.GetProperty("urls")[0].GetString());
-
-        var username = turn.GetProperty("username").GetString()!;
-        var parts = username.Split(':', 2);
-        Assert.Equal(deviceId.ToString("D"), parts[1]);
-        var expected = Convert.ToBase64String(HMACSHA1.HashData(
-            Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(username)));
-        Assert.Equal(expected, turn.GetProperty("credential").GetString());
-    }
-
-    private static async Task SeedRelaySettingsAsync(
-        SonicRelayApiFactory factory, string relayMode, string[]? turnUris = null, string? turnSecret = null)
-    {
-        using var scope = factory.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-        db.RelaySettings.Add(new RelaySettings
-        {
-            Id = RelaySettings.SingletonId,
-            RelayMode = relayMode,
-            TurnUris = turnUris,
-            TurnStaticAuthSecret = turnSecret,
-            UpdatedAt = DateTimeOffset.UtcNow
-        });
-        await db.SaveChangesAsync();
+        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
     }
 
     private static async Task<JsonElement> GetIceServersAsync(HttpClient client)

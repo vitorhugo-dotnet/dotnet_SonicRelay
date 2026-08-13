@@ -1,9 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
-using SonicRelay.Domain.RelaySettings;
-using SonicRelay.Infrastructure.Persistence;
 
 namespace SonicRelay.Api.Services;
 
@@ -25,20 +22,12 @@ public sealed record IceServerEntry(IReadOnlyList<string> Urls, string? Username
 
 public sealed record IceServersResponse(IReadOnlyList<IceServerEntry> IceServers, int TtlSeconds);
 
-public sealed class TurnCredentialService(IOptions<TurnOptions> options, AppDbContext db, TimeProvider time)
+public sealed class TurnCredentialService(IOptions<TurnOptions> options, TimeProvider time)
 {
-    public async Task<IceServersResponse> BuildAsync(string deviceId, CancellationToken cancellationToken)
+    public Task<IceServersResponse> BuildAsync(string deviceId, CancellationToken cancellationToken)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(deviceId);
         var settings = options.Value;
-        var overrideRow = await db.RelaySettings.AsNoTracking()
-            .SingleOrDefaultAsync(x => x.Id == RelaySettings.SingletonId, cancellationToken);
-
-        var relayMode = overrideRow?.RelayMode ?? RelayModes.Automatic;
-        var turnUris = overrideRow?.TurnUris is { Length: > 0 } overriddenUris ? overriddenUris : settings.TurnUris;
-        var secret = string.IsNullOrWhiteSpace(overrideRow?.TurnStaticAuthSecret)
-            ? settings.StaticAuthSecret
-            : overrideRow.TurnStaticAuthSecret;
 
         var servers = new List<IceServerEntry>();
         if (settings.StunUris.Length > 0)
@@ -46,15 +35,15 @@ public sealed class TurnCredentialService(IOptions<TurnOptions> options, AppDbCo
             servers.Add(new IceServerEntry(settings.StunUris));
         }
 
-        if (relayMode != RelayModes.DisableFallback && !string.IsNullOrWhiteSpace(secret) && turnUris.Length > 0)
+        if (!string.IsNullOrWhiteSpace(settings.StaticAuthSecret) && settings.TurnUris.Length > 0)
         {
             var expiry = time.GetUtcNow().ToUnixTimeSeconds() + settings.CredentialTtlSeconds;
             var username = FormattableString.Invariant($"{expiry}:{deviceId}");
             var credential = Convert.ToBase64String(HMACSHA1.HashData(
-                Encoding.UTF8.GetBytes(secret), Encoding.UTF8.GetBytes(username)));
-            servers.Add(new IceServerEntry(turnUris, username, credential));
+                Encoding.UTF8.GetBytes(settings.StaticAuthSecret), Encoding.UTF8.GetBytes(username)));
+            servers.Add(new IceServerEntry(settings.TurnUris, username, credential));
         }
 
-        return new IceServersResponse(servers, settings.CredentialTtlSeconds);
+        return Task.FromResult(new IceServersResponse(servers, settings.CredentialTtlSeconds));
     }
 }

@@ -17,10 +17,12 @@ public static class SessionEndpoints
         var group = app.MapGroup("/api/sessions").WithTags("Sessions");
         group.MapPost("/", CreateAsync).RequireAuthorization("session:create").RequireRateLimiting("create-session");
         group.MapGet("/active", GetActiveAsync).RequireAuthorization("DeviceAuthenticated");
+        group.MapGet("/discoverable", GetDiscoverableAsync).RequireAuthorization("session:join");
         group.MapGet("/{sessionId:guid}", GetAsync).RequireAuthorization("DeviceAuthenticated");
         group.MapPost("/{sessionId:guid}/end", EndAsync).RequireAuthorization("session:end");
         group.MapPost("/{sessionId:guid}/rotate-code", RotateCodeAsync).RequireAuthorization("session:end").RequireRateLimiting("rotate-code");
         group.MapPost("/join", JoinAsync).RequireAuthorization("session:join").RequireRateLimiting("join-session");
+        group.MapPost("/{sessionId:guid}/join", JoinByIdAsync).RequireAuthorization("session:join").RequireRateLimiting("join-session");
         return app;
     }
 
@@ -83,6 +85,40 @@ public static class SessionEndpoints
                 ViewerCount = db.SessionParticipants.Count(p => p.SessionId == x.Id && p.Role == ParticipantRoles.Viewer
                     && p.Status == ParticipantStatuses.Connected)
             }).ToListAsync(ct);
+        return Results.Ok(sessions);
+    }
+
+    // Sessions a paired viewer is allowed to join without a code. The pairing is the
+    // authorization; the join code only ever proved the viewer could read the publisher's
+    // screen, which an active pairing establishes more strongly. No code is projected here
+    // — it is a separate short-lived secret and discovery must not become a way to read it.
+    private static async Task<IResult> GetDiscoverableAsync(ClaimsPrincipal principal, AppDbContext db,
+        CancellationToken ct)
+    {
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+
+        var sessions = await db.StreamSessions.AsNoTracking()
+            .Where(x => (x.Status == SessionStatuses.Waiting || x.Status == SessionStatuses.Active)
+                && db.DevicePairings.Any(p => p.PublisherDeviceId == x.SourceDeviceId
+                    && p.ViewerDeviceId == device.Id
+                    && p.Status == DevicePairingStatuses.Active))
+            .OrderByDescending(x => x.CreatedAt)
+            .Select(x => new
+            {
+                SessionId = x.Id,
+                PublisherDeviceId = x.SourceDeviceId,
+                PublisherDeviceName = db.DeviceIdentities
+                    .Where(d => d.Id == x.SourceDeviceId).Select(d => d.Name).FirstOrDefault(),
+                x.Status,
+                x.MaxViewers,
+                x.CreatedAt,
+                ViewerCount = db.SessionParticipants.Count(p => p.SessionId == x.Id
+                    && p.Role == ParticipantRoles.Viewer
+                    && p.Status == ParticipantStatuses.Connected)
+            })
+            .ToListAsync(ct);
+
         return Results.Ok(sessions);
     }
 
@@ -178,6 +214,35 @@ public static class SessionEndpoints
             return InvalidCode();
         }
 
+        return await AdmitViewerAsync(session, device, db, loggerFactory, ct);
+    }
+
+    // Code-free join for a session the caller found through /discoverable. It runs exactly the
+    // checks the code path runs after redemption; the active pairing is the authorization.
+    // A session the caller cannot see is reported as invalid_code rather than not_paired, so
+    // this endpoint cannot be used to probe which session ids exist.
+    private static async Task<IResult> JoinByIdAsync(Guid sessionId, ClaimsPrincipal principal, AppDbContext db,
+        ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
+        if (device is null) return Results.Unauthorized();
+
+        var session = await db.StreamSessions.SingleOrDefaultAsync(x => x.Id == sessionId, ct);
+        if (session is null || session.Status is SessionStatuses.Ended or SessionStatuses.Expired)
+            return InvalidCode();
+
+        return await AdmitViewerAsync(session, device, db, loggerFactory, ct);
+    }
+
+    // Shared by both join paths (code and session id): everything that happens once a live
+    // session has been resolved. Keeping it in one place is what stops the two entry points
+    // from drifting on pairing, viewer-limit or reconnect semantics.
+    private static async Task<IResult> AdmitViewerAsync(StreamSession session, DeviceIdentity device,
+        AppDbContext db, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var logger = loggerFactory.CreateLogger("SonicRelay.Sessions");
+
         var existing = await db.SessionParticipants.SingleOrDefaultAsync(x => x.SessionId == session.Id
             && x.DeviceId == device.Id && x.Role == ParticipantRoles.Viewer, ct);
         if (existing is not null)
@@ -185,14 +250,14 @@ public static class SessionEndpoints
             existing.Status = ParticipantStatuses.Connected;
             existing.LeftAt = null;
             await db.SaveChangesAsync(ct);
-            loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+            logger.LogInformation(
                 "Reconnected participant {ParticipantId} to session {SessionId} from device {DeviceId}",
                 existing.Id, session.Id, device.Id);
             return Results.Ok(ToResponse(session));
         }
 
         if (!await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
-            return InvalidCode();
+            return NotPaired();
 
         // Viewers mid-reconnect-grace-period still hold their slot, otherwise a new viewer
         // could take it during the grace window and leave a maxViewers=1 session with two
@@ -218,13 +283,21 @@ public static class SessionEndpoints
             session.StartedAt = now;
         }
         await db.SaveChangesAsync(ct);
-        loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+        logger.LogInformation(
             "Joined session {SessionId} as participant {ParticipantId} from device {DeviceId}",
             session.Id, participant.Id, device.Id);
         return Results.Ok(ToResponse(session));
     }
 
-    private static IResult InvalidCode() => Results.NotFound(new { error = "Invalid or expired session code." });
+    private static IResult InvalidCode() =>
+        Results.NotFound(new { error = "Invalid or expired session code.", code = "invalid_code" });
+
+    private static IResult NotPaired() =>
+        Results.Json(new
+        {
+            error = "This device is not paired with the publisher of that session.",
+            code = "not_paired"
+        }, statusCode: StatusCodes.Status403Forbidden);
 
     private static Task<bool> HasActivePairingAsync(AppDbContext db,
         Guid publisherId, Guid viewerId, CancellationToken ct) =>
