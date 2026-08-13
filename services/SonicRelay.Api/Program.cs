@@ -122,6 +122,17 @@ builder.Services.AddRateLimiter(options =>
     options.AddPolicy("pairing-create", context => IpLimit(context, "RateLimits:PairingCreate", 10));
     options.AddPolicy("pairing-complete", context => IpLimit(context, "RateLimits:PairingComplete", 10));
 });
+// A signaling socket carries no traffic between negotiations — this server only answers
+// `pong` to a client `ping` and never initiates one — so it sits idle, and intermediaries
+// reap idle WebSockets. Viewer diagnostics showed a near-constant ~90s close; nginx's own
+// default read timeout is 60s. The framework default of 2 minutes is longer than either, so
+// it never fired in time. Clients set their own keepalive too, but an already installed app
+// version keeps whatever it shipped with, so the server has to hold the connection open on
+// its own. Configured here rather than passed to UseWebSockets() so the value is observable
+// through DI and can be asserted in tests.
+// 20s matches both clients, leaving room for a lost ping inside a 60s window.
+builder.Services.Configure<WebSocketOptions>(options =>
+    options.KeepAliveInterval = TimeSpan.FromSeconds(20));
 builder.Services.AddHealthChecks()
     .AddNpgSql(builder.Configuration.GetConnectionString("Postgres") ?? string.Empty, name: "postgres")
     .AddRedis(builder.Configuration["Redis:ConnectionString"] ?? string.Empty, name: "redis");
