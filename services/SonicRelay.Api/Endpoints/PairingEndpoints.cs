@@ -92,7 +92,12 @@ public static class PairingEndpoints
         };
         db.DevicePairings.Add(pairing);
         await db.SaveChangesAsync(ct);
-        return Results.Ok(ToResponse(pairing));
+
+        var publisherName = await db.DeviceIdentities.AsNoTracking()
+            .Where(x => x.Id == challenge.PublisherDeviceId)
+            .Select(x => x.Name)
+            .SingleOrDefaultAsync(ct) ?? string.Empty;
+        return Results.Ok(ToResponse(pairing, publisherName, viewer.Name));
     }
 
     private static async Task<IResult> ListAsync(Guid deviceId, ClaimsPrincipal principal,
@@ -101,12 +106,25 @@ public static class PairingEndpoints
         var caller = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
         if (caller is null || caller.Id != deviceId) return Results.Unauthorized();
 
-        var pairings = await db.DevicePairings.AsNoTracking()
-            .Where(x => (x.PublisherDeviceId == deviceId || x.ViewerDeviceId == deviceId)
-                && x.Status == DevicePairingStatuses.Active)
-            .OrderByDescending(x => x.CreatedAt)
+        var pairings = await (
+            from pairing in db.DevicePairings.AsNoTracking()
+            where (pairing.PublisherDeviceId == deviceId || pairing.ViewerDeviceId == deviceId)
+                && pairing.Status == DevicePairingStatuses.Active
+            join publisherJoin in db.DeviceIdentities.AsNoTracking()
+                on pairing.PublisherDeviceId equals publisherJoin.Id into publishers
+            from publisher in publishers.DefaultIfEmpty()
+            join viewerJoin in db.DeviceIdentities.AsNoTracking()
+                on pairing.ViewerDeviceId equals viewerJoin.Id into viewers
+            from viewer in viewers.DefaultIfEmpty()
+            orderby pairing.CreatedAt descending
+            select new
+            {
+                Pairing = pairing,
+                PublisherName = publisher != null ? publisher.Name : string.Empty,
+                ViewerName = viewer != null ? viewer.Name : string.Empty
+            })
             .ToListAsync(ct);
-        return Results.Ok(pairings.Select(ToResponse));
+        return Results.Ok(pairings.Select(x => ToResponse(x.Pairing, x.PublisherName, x.ViewerName)));
     }
 
     private static async Task<IResult> RevokeAsync(Guid pairingId, ClaimsPrincipal principal,
@@ -134,7 +152,8 @@ public static class PairingEndpoints
         && challenge.ExpiresAt > now
         && challenge.AttemptCount < challenge.MaxAttempts;
 
-    internal static PairingResponse ToResponse(DevicePairing pairing) => new(
+    internal static PairingResponse ToResponse(DevicePairing pairing,
+        string publisherDeviceName, string viewerDeviceName) => new(
         pairing.Id, pairing.PublisherDeviceId, pairing.ViewerDeviceId, pairing.Status,
-        pairing.CreatedAt, pairing.LastUsedAt);
+        pairing.CreatedAt, pairing.LastUsedAt, publisherDeviceName, viewerDeviceName);
 }

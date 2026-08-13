@@ -133,16 +133,53 @@ public sealed class WebRtcEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
-    public async Task Relay_settings_endpoint_is_gone()
+    public async Task Ice_servers_replaces_the_provider_turn_entry_with_the_devices_custom_relay()
     {
-        await using var factory = new SonicRelayApiFactory();
-        var client = factory.CreateClient();
-        await DeviceIdentityTestHelper.BootstrapAndAuthorizeAsync(
-            client, DeviceTypes.WindowsPublisher, DevicePlatforms.Windows);
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Turn:StaticAuthSecret"] = "provider-secret",
+            ["Turn:TurnUris:0"] = "turn:provider.example.com:3478?transport=udp"
+        });
+        var (client, _) = await BootstrapAsync(factory);
+        var update = await client.PutAsJsonAsync("/api/settings/relay", new
+        {
+            turnUris = new[] { "turn:my-own-coturn.example.net:3478" },
+            turnUsername = "me",
+            turnCredential = "hunter2"
+        });
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
 
-        var response = await client.GetAsync("/api/settings/relay");
+        var body = await GetIceServersAsync(client);
 
-        Assert.Equal(HttpStatusCode.NotFound, response.StatusCode);
+        var turn = body.GetProperty("iceServers").EnumerateArray()
+            .Single(item => item.GetProperty("urls")[0].GetString()!.StartsWith("turn", StringComparison.Ordinal));
+        Assert.Equal(1, turn.GetProperty("urls").GetArrayLength());
+        Assert.Equal("turn:my-own-coturn.example.net:3478", turn.GetProperty("urls")[0].GetString());
+        Assert.Equal("me", turn.GetProperty("username").GetString());
+        Assert.Equal("hunter2", turn.GetProperty("credential").GetString());
+        // The provider's relay must not appear anywhere once a custom relay is configured.
+        Assert.DoesNotContain(body.GetProperty("iceServers").EnumerateArray(),
+            item => item.GetProperty("urls").EnumerateArray()
+                .Any(url => url.GetString()!.Contains("provider.example.com")));
+    }
+
+    [Fact]
+    public async Task Ice_servers_omits_the_turn_entry_when_relay_fallback_is_disabled()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Turn:StaticAuthSecret"] = "provider-secret",
+            ["Turn:TurnUris:0"] = "turn:provider.example.com:3478?transport=udp"
+        });
+        var (client, _) = await BootstrapAsync(factory);
+        var update = await client.PutAsJsonAsync("/api/settings/relay", new { relayMode = "disableFallback" });
+        Assert.Equal(HttpStatusCode.OK, update.StatusCode);
+
+        var body = await GetIceServersAsync(client);
+
+        Assert.DoesNotContain(body.GetProperty("iceServers").EnumerateArray(),
+            item => item.GetProperty("urls").EnumerateArray()
+                .Any(url => url.GetString()!.StartsWith("turn", StringComparison.Ordinal)));
     }
 
     private static async Task<JsonElement> GetIceServersAsync(HttpClient client)

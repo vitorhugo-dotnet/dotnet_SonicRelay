@@ -372,6 +372,61 @@ public sealed class SessionEndpointsTests : IClassFixture<SonicRelayApiFactory>
     }
 
     [Fact]
+    public async Task Cleanup_keeps_an_active_session_alive_past_its_code_expiry()
+    {
+        await using var factory = new SonicRelayApiFactory();
+        var (_, sessionId, _) = await CreateSessionAsync(factory);
+        await using (var seedScope = factory.Services.CreateAsyncScope())
+        {
+            var db = seedScope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var session = await db.StreamSessions.SingleAsync(x => x.Id == sessionId);
+            session.Status = SessionStatuses.Active;
+            session.CodeExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-30);
+            await db.SaveChangesAsync();
+        }
+
+        await factory.Services.GetRequiredService<SessionCleanupService>().CleanupOnceAsync(CancellationToken.None);
+
+        await using var assertScope = factory.Services.CreateAsyncScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        // The publisher participant is still connected, so the running broadcast survives the
+        // join-code TTL — only new joins are gated by the code.
+        Assert.Equal(SessionStatuses.Active,
+            (await assertDb.StreamSessions.SingleAsync(x => x.Id == sessionId)).Status);
+    }
+
+    [Fact]
+    public async Task Cleanup_ends_an_active_session_once_every_participant_has_left_for_good()
+    {
+        await using var factory = new SonicRelayApiFactory(new Dictionary<string, string?>
+        {
+            ["Sessions:AbandonedSessionMinutes"] = "10"
+        });
+        var (_, sessionId, _) = await CreateSessionAsync(factory);
+        await using (var seedScope = factory.Services.CreateAsyncScope())
+        {
+            var db = seedScope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var session = await db.StreamSessions.SingleAsync(x => x.Id == sessionId);
+            session.Status = SessionStatuses.Active;
+            var participants = await db.SessionParticipants.Where(x => x.SessionId == sessionId).ToListAsync();
+            foreach (var participant in participants)
+            {
+                participant.Status = ParticipantStatuses.Disconnected;
+                participant.ConnectionId = null;
+                participant.LeftAt = DateTimeOffset.UtcNow.AddMinutes(-15);
+            }
+            await db.SaveChangesAsync();
+        }
+
+        await factory.Services.GetRequiredService<SessionCleanupService>().CleanupOnceAsync(CancellationToken.None);
+
+        await using var assertScope = factory.Services.CreateAsyncScope();
+        var assertDb = assertScope.ServiceProvider.GetRequiredService<AppDbContext>();
+        Assert.Equal(SessionStatuses.Ended,
+            (await assertDb.StreamSessions.SingleAsync(x => x.Id == sessionId)).Status);
+    }
+
+    [Fact]
     public async Task Owner_can_list_get_and_end_a_session()
     {
         var (ownerClient, sessionId, _) = await CreateSessionAsync();

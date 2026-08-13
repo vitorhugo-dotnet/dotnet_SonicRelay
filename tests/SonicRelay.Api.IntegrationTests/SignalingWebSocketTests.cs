@@ -282,14 +282,12 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
     }
 
     [Theory]
-    [InlineData(SessionStatuses.Ended, false)]
-    [InlineData(SessionStatuses.Expired, false)]
-    [InlineData(SessionStatuses.Active, true)]
-    public async Task Signaling_rejects_terminal_or_elapsed_sessions(string status, bool elapsed)
+    [InlineData(SessionStatuses.Ended)]
+    [InlineData(SessionStatuses.Expired)]
+    public async Task Signaling_rejects_terminal_sessions(string status)
     {
-        var participant = await CreateParticipantAsync($"terminal-{status}-{elapsed}");
-        await SetSessionStateAsync(participant.SessionId, status,
-            elapsed ? DateTimeOffset.UtcNow.AddMinutes(-1) : DateTimeOffset.UtcNow.AddMinutes(5));
+        var participant = await CreateParticipantAsync($"terminal-{status}");
+        await SetSessionStateAsync(participant.SessionId, status, DateTimeOffset.UtcNow.AddMinutes(5));
         var client = _factory.Server.CreateWebSocketClient();
         client.ConfigureRequest = request => request.Headers.Authorization = $"Bearer {participant.AccessToken}";
 
@@ -298,6 +296,21 @@ public sealed class SignalingWebSocketTests : IClassFixture<SonicRelayApiFactory
             CancellationToken.None));
 
         Assert.Contains("410", exception.Message);
+    }
+
+    [Fact]
+    public async Task Signaling_accepts_an_active_session_whose_join_code_has_elapsed()
+    {
+        // The join code only gates new joins; a live session must keep signaling past the
+        // code TTL, otherwise a running broadcast dies ten minutes after it was created.
+        var participant = await CreateParticipantAsync("active-elapsed-code");
+        await SetSessionStateAsync(participant.SessionId, SessionStatuses.Active,
+            DateTimeOffset.UtcNow.AddMinutes(-1));
+
+        using var socket = await ConnectAsync(participant);
+        var joined = await ReceiveAsync(socket);
+
+        AssertEnvelope(joined, "session.joined", participant.SessionId);
     }
 
     [Fact]
