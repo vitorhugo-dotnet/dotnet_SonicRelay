@@ -101,6 +101,7 @@ See [device identity configuration](docs/device-identity.md#configuration) for d
 - [Guia para leigos: WebSocket, WebRTC, Signaling, Opus e arquitetura](docs/beginner-guide.md)
 - [Security](docs/security.md)
 - [VPS deployment over SSH](docs/deployment-vps-ssh.md)
+- [Product naming](docs/naming.md)
 - [Architecture decision records](docs/adr/)
 
 ## CI/CD summary
