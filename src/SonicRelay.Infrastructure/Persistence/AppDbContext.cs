@@ -35,6 +35,13 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Role).HasMaxLength(32).IsRequired();
             entity.Property(x => x.Status).HasMaxLength(32).IsRequired();
             entity.HasIndex(x => new { x.SessionId, x.Role }).HasDatabaseName("ix_session_participants_session_role");
+            // A device holds at most one participant row per role in a session. Rejoin after a
+            // network loss is a read-then-insert, and without this two concurrent attempts from
+            // the same device could each insert a row — consuming a viewer slot twice and
+            // splitting signaling routing across two participant ids.
+            entity.HasIndex(x => new { x.SessionId, x.DeviceId, x.Role })
+                .IsUnique()
+                .HasDatabaseName("ux_session_participants_session_device_role");
         });
 
         modelBuilder.Entity<SignalingEvent>(entity =>

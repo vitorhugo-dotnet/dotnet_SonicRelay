@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using SonicRelay.Application.Abstractions;
 using SonicRelay.Infrastructure.Persistence;
 using SonicRelay.Infrastructure.Redis;
+using SonicRelay.Infrastructure.Sessions;
 using SonicRelay.Infrastructure.Signaling;
 
 namespace SonicRelay.Infrastructure;
@@ -19,6 +20,7 @@ public static class InfrastructureServiceCollectionExtensions
         services.AddSingleton<ISessionCodeStore, RedisSessionCodeStore>();
         services.AddSingleton<IConnectionRegistry, InMemoryConnectionRegistry>();
         services.AddSingleton<IParticipantReconnectTracker, InMemoryParticipantReconnectTracker>();
+        services.AddSingleton<IParticipantAdmissionLock, InMemoryParticipantAdmissionLock>();
         return services;
     }
 }

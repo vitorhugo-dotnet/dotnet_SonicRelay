@@ -66,9 +66,14 @@ public static class SignalingWebSocketEndpoint
             return;
         }
 
-        var participant = await db.SessionParticipants.SingleOrDefaultAsync(x =>
-            x.SessionId == sessionId && x.DeviceId == device.Id,
-            context.RequestAborted);
+        // Oldest-first FirstOrDefault, not SingleOrDefault: duplicates are ruled out going
+        // forward by the unique index on (SessionId, DeviceId, Role), but a row pair written
+        // before it existed must not turn every reconnect of that device into a 500 — the
+        // device has no way to recover from that, and the session is still perfectly alive.
+        var participant = await db.SessionParticipants
+            .Where(x => x.SessionId == sessionId && x.DeviceId == device.Id)
+            .OrderBy(x => x.JoinedAt)
+            .FirstOrDefaultAsync(context.RequestAborted);
         if (participant is null)
         {
             context.Response.StatusCode = StatusCodes.Status403Forbidden;
