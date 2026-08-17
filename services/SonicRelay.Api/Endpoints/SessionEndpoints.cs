@@ -188,7 +188,8 @@ public static class SessionEndpoints
     }
 
     private static async Task<IResult> JoinAsync(JoinSessionRequest request, ClaimsPrincipal principal, AppDbContext db,
-        ISessionCodeStore codeStore, IConfiguration configuration, ILoggerFactory loggerFactory, CancellationToken ct)
+        ISessionCodeStore codeStore, IConfiguration configuration, IParticipantAdmissionLock admissionLock,
+        ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
         if (device is null) return Results.Unauthorized();
@@ -216,7 +217,7 @@ public static class SessionEndpoints
             return InvalidCode();
         }
 
-        return await AdmitViewerAsync(session, device, db, loggerFactory, ct);
+        return await AdmitViewerAsync(session, device, db, admissionLock, loggerFactory, ct);
     }
 
     // Code-free join for a session the caller found through /discoverable. It runs exactly the
@@ -224,7 +225,7 @@ public static class SessionEndpoints
     // A session the caller cannot see is reported as invalid_code rather than not_paired, so
     // this endpoint cannot be used to probe which session ids exist.
     private static async Task<IResult> JoinByIdAsync(Guid sessionId, ClaimsPrincipal principal, AppDbContext db,
-        ILoggerFactory loggerFactory, CancellationToken ct)
+        IParticipantAdmissionLock admissionLock, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var device = await DeviceIdentityEndpoints.RequireDeviceAsync(principal, db, ct);
         if (device is null) return Results.Unauthorized();
@@ -233,29 +234,48 @@ public static class SessionEndpoints
         if (session is null || session.Status is SessionStatuses.Ended or SessionStatuses.Expired)
             return InvalidCode();
 
-        return await AdmitViewerAsync(session, device, db, loggerFactory, ct);
+        return await AdmitViewerAsync(session, device, db, admissionLock, loggerFactory, ct);
     }
 
     // Shared by both join paths (code and session id): everything that happens once a live
     // session has been resolved. Keeping it in one place is what stops the two entry points
     // from drifting on pairing, viewer-limit or reconnect semantics.
     private static async Task<IResult> AdmitViewerAsync(StreamSession session, DeviceIdentity device,
+        AppDbContext db, IParticipantAdmissionLock admissionLock, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        // Admission is read-then-insert, so two joins racing each other would otherwise both see
+        // "no participant yet" and both insert one. That is not a hypothetical: a device coming
+        // back from a network loss legitimately fires several joins at once (the automatic
+        // recovery plus a manual retry, or attempts either side of an interface handover), and a
+        // duplicate row eats a viewer slot and splits signaling routing across two participant
+        // ids. The unique index on (SessionId, DeviceId, Role) is the cross-instance backstop;
+        // this lock keeps the single-instance case off the constraint-violation path entirely.
+        using var admission = await admissionLock.AcquireAsync(session.Id, device.Id, ct);
+        try
+        {
+            return await AdmitViewerCoreAsync(session, device, db, loggerFactory, ct);
+        }
+        catch (DbUpdateException)
+        {
+            // Another API instance won the insert. Its row is the participant now; adopt it
+            // rather than reporting a failure the client could only answer by retrying.
+            db.ChangeTracker.Clear();
+            var winner = await FindViewerParticipantAsync(db, session.Id, device.Id, ct);
+            if (winner is null) throw;
+            return await ResumeParticipantAsync(winner, session, device, db, loggerFactory, ct);
+        }
+    }
+
+    private static async Task<IResult> AdmitViewerCoreAsync(StreamSession session, DeviceIdentity device,
         AppDbContext db, ILoggerFactory loggerFactory, CancellationToken ct)
     {
         var now = DateTimeOffset.UtcNow;
         var logger = loggerFactory.CreateLogger("SonicRelay.Sessions");
 
-        var existing = await db.SessionParticipants.SingleOrDefaultAsync(x => x.SessionId == session.Id
-            && x.DeviceId == device.Id && x.Role == ParticipantRoles.Viewer, ct);
+        var existing = await FindViewerParticipantAsync(db, session.Id, device.Id, ct);
         if (existing is not null)
         {
-            existing.Status = ParticipantStatuses.Connected;
-            existing.LeftAt = null;
-            await db.SaveChangesAsync(ct);
-            logger.LogInformation(
-                "Reconnected participant {ParticipantId} to session {SessionId} from device {DeviceId}",
-                existing.Id, session.Id, device.Id);
-            return Results.Ok(ToResponse(session));
+            return await ResumeParticipantAsync(existing, session, device, db, loggerFactory, ct);
         }
 
         if (!await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
@@ -264,9 +284,7 @@ public static class SessionEndpoints
         // Viewers mid-reconnect-grace-period still hold their slot, otherwise a new viewer
         // could take it during the grace window and leave a maxViewers=1 session with two
         // viewers once the original one's WebSocket reconnects.
-        var viewerCount = await db.SessionParticipants.CountAsync(x => x.SessionId == session.Id
-            && x.Role == ParticipantRoles.Viewer
-            && (x.Status == ParticipantStatuses.Connected || x.Status == ParticipantStatuses.Reconnecting), ct);
+        var viewerCount = await CountDistinctActiveViewerDevicesAsync(db, session.Id, ct);
         if (viewerCount >= session.MaxViewers) return Results.Conflict(new { error = "Session viewer limit reached." });
 
         var participant = new SessionParticipant
@@ -290,6 +308,45 @@ public static class SessionEndpoints
             session.Id, participant.Id, device.Id);
         return Results.Ok(ToResponse(session));
     }
+
+    private static async Task<IResult> ResumeParticipantAsync(SessionParticipant participant, StreamSession session,
+        DeviceIdentity device, AppDbContext db, ILoggerFactory loggerFactory, CancellationToken ct)
+    {
+        participant.Status = ParticipantStatuses.Connected;
+        participant.LeftAt = null;
+        await db.SaveChangesAsync(ct);
+        loggerFactory.CreateLogger("SonicRelay.Sessions").LogInformation(
+            "Reconnected participant {ParticipantId} to session {SessionId} from device {DeviceId}",
+            participant.Id, session.Id, device.Id);
+        return Results.Ok(ToResponse(session));
+    }
+
+    /// <summary>
+    /// The one viewer participant a device owns in a session, or null. Deliberately
+    /// <c>FirstOrDefault</c> over the oldest row rather than <c>SingleOrDefault</c>: the unique
+    /// index makes duplicates impossible going forward, but rows written before it exists must
+    /// not wedge rejoin on a 500 the device can never recover from on its own.
+    /// </summary>
+    private static Task<SessionParticipant?> FindViewerParticipantAsync(AppDbContext db, Guid sessionId,
+        Guid deviceId, CancellationToken ct) =>
+        db.SessionParticipants
+            .Where(x => x.SessionId == sessionId && x.DeviceId == deviceId && x.Role == ParticipantRoles.Viewer)
+            .OrderBy(x => x.JoinedAt)
+            .FirstOrDefaultAsync(ct);
+
+    /// <summary>
+    /// Viewer slots in use, counted by distinct device. Counting rows instead would let a
+    /// pre-existing duplicate consume a session's whole viewer budget and lock its own device
+    /// out of the session it is trying to rejoin.
+    /// </summary>
+    private static async Task<int> CountDistinctActiveViewerDevicesAsync(AppDbContext db, Guid sessionId,
+        CancellationToken ct) =>
+        (await db.SessionParticipants
+            .Where(x => x.SessionId == sessionId && x.Role == ParticipantRoles.Viewer
+                && (x.Status == ParticipantStatuses.Connected || x.Status == ParticipantStatuses.Reconnecting))
+            .Select(x => x.DeviceId)
+            .Distinct()
+            .ToListAsync(ct)).Count;
 
     private static IResult InvalidCode() =>
         Results.NotFound(new { error = "Invalid or expired session code.", code = "invalid_code" });
