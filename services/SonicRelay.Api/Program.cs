@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi.Models;
 using Prometheus;
 using SonicRelay.Api.Authorization;
 using SonicRelay.Api.Endpoints;
@@ -22,7 +23,18 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Logging.AddFilter("Microsoft.EntityFrameworkCore.Database.Command", LogLevel.Warning);
 
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
+// Name the document explicitly: unconfigured, Swashbuckle titles the Swagger UI
+// after the assembly ("SonicRelay.Api"), showing an internal identifier on the
+// API's most public page. `SonicRelay` is the canonical product spelling.
+builder.Services.AddSwaggerGen(options => options.SwaggerDoc("v1", new OpenApiInfo
+{
+    Title = "SonicRelay API",
+    Version = "v1",
+    Description =
+        "Control plane for SonicRelay: device identity, pairing, sessions, join codes and " +
+        "WebSocket signaling. WebRTC/Opus audio flows directly between clients, or through " +
+        "coturn, and never through this API.",
+}));
 builder.Services.AddSonicRelayInfrastructure(builder.Configuration);
 builder.Services.AddSingleton<SonicRelay.Api.Observability.SonicRelayMetrics>();
 builder.Services.TryAddSingleton(TimeProvider.System);
