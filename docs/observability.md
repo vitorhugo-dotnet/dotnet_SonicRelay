@@ -93,6 +93,44 @@ The existing stack already has `prometheus`, `loki`, `tempo` and `jaeger` dataso
   together with the transport mode and the api/coturn logs panel to see whether loss
   coincides with a relay switch, ICE restart or signaling error.
 
+## Client recovery journal
+
+The desktop publisher and the Flutter viewer each write a recovery line per step
+of a reconnect into their own on-device diagnostic log (category `Recovery`),
+using one shared vocabulary. Both are redacted through the existing
+`DiagnosticRedactor` before they hit disk, so a journal line never carries a
+token, a full SDP body or a full ICE candidate — a recovery `reason` is usually a
+raw error string, which is exactly where those leak in.
+
+The vocabulary is fixed and identical on both clients. That is the point:
+recovery spans two client codebases and this backend, so correlating a viewer's
+timeline against a publisher's has to be a matter of sorting by timestamp, not of
+translating between two ad-hoc phrasings.
+
+| Event | Meaning |
+| --- | --- |
+| `network_lost` | The device reports no usable transport; recovery is parked and spends no attempt budget. |
+| `network_restored` | A transport came back; a stabilization window runs before the next attempt. |
+| `recovery_started` | A new recovery generation began. |
+| `recovery_cancelled` | The lifecycle was cancelled (a deliberate close) while recovering. |
+| `stale_attempt_ignored` | A result arrived from a superseded generation and was discarded. |
+| `signaling_reconnect_started` / `_succeeded` | One signaling socket attempt. |
+| `session_rejoin_started` / `_succeeded` | Rejoining the session over the restored socket. |
+| `ice_restart_started` / `_succeeded` | ICE restart on an existing peer connection. |
+| `peer_rebuild_started` / `_succeeded` | The peer connection was rebuilt after a restart failed. |
+| `media_resumed` | Inbound RTP advanced again — the only thing that makes a viewer read as live. |
+| `recovery_failed` | Recovery gave up; `reason` says why. |
+
+Every line carries `generation` and `attempt`. The generation is what makes an
+out-of-order log readable: an attempt that finishes after a newer one has taken
+over still logs, and without the stamp its lines are indistinguishable from the
+live attempt's — which is what makes "it said connected but no audio came back"
+so hard to reconstruct after the fact. Steps also carry `stage`, `state`,
+`reason` and a masked `sessionCorrelationId` where they apply.
+
+These journals are local to the device and are surfaced through each client's
+existing diagnostic export; they are not scraped by Prometheus.
+
 ## Not covered (deliberate follow-ups)
 
 - Per-peer `availableIncoming/OutgoingBitrate` and `concealedSamples` are accepted by the
