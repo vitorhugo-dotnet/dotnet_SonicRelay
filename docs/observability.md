@@ -26,6 +26,26 @@ bounded enums.
 | `sonicrelay_session_jitter_ms` | histogram | `role` | Inbound audio jitter (ms). |
 | `sonicrelay_session_rtt_ms` | histogram | `role` | WebRTC round-trip time (ms). |
 
+### Data-retention metrics
+
+The retention sweep (issue #44) publishes its own series here, for a different reason
+than the rest of this page: a cleanup that silently stops running has no user-visible
+symptom, and SonicRelay's Google Play Data Safety declaration stops being true while
+everything else looks healthy. These are the only signal that it is still working.
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `sonicrelay_data_retention_runs_total` | counter | — | Cleanup passes that completed. |
+| `sonicrelay_data_retention_deleted_records_total` | counter | `entity` | Records permanently deleted, by table. |
+| `sonicrelay_data_retention_failures_total` | counter | — | Cleanup passes that failed. |
+| `sonicrelay_data_retention_last_success_timestamp` | gauge | — | Unix seconds of the last fully successful pass. |
+| `sonicrelay_device_identity_rotations_total` | counter | — | Device identities replaced by a new identifier. |
+
+`entity` is a fixed set of table names, so a scrape can never reveal *which* device or
+session was erased. `/health/ready` also carries a `data-retention` check that turns
+unhealthy once the last success is older than `DataRetention:StaleAfterHours` (48 by
+default). See [data retention](data-retention.md) for the policy these enforce.
+
 ### Client WebRTC stats ingestion
 
 Clients POST periodic `getStats()` snapshots to an authenticated endpoint; only a
@@ -92,6 +112,10 @@ The existing stack already has `prometheus`, `loki`, `tempo` and `jaeger` dataso
 - **Correlate a loss event:** with a session live, watch packet-loss/jitter/RTT percentiles
   together with the transport mode and the api/coturn logs panel to see whether loss
   coincides with a relay switch, ICE restart or signaling error.
+- **Data retention:** confirm `sonicrelay_data_retention_last_success_timestamp` advances
+  at least daily. `time() - sonicrelay_data_retention_last_success_timestamp` is the age of
+  the last successful cleanup and is what the `SonicRelayDataRetentionStalled` alert
+  watches.
 
 ## Client recovery journal
 

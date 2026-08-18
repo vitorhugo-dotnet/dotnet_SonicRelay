@@ -177,6 +177,8 @@ erDiagram
 
 `StreamSession` and `SessionParticipant` are authorized through device identity: a session has a `sourceDeviceId`, and participants have a `deviceId`; neither stores an application-user owner. `DevicePairing` records the durable publisher/viewer relationship, and a viewer must have an active `DevicePairing` with the session's publisher device before `POST /api/sessions/join` will admit it — the legacy owner-scoped `Device` entity and its `ownerUserId` column were removed in Phase 4 (see [ADR 0006](adr/0006-remove-identity.md)), so there is no separate ownership model to reconcile with. EF Core maps these tables but does not declare relational foreign-key navigation constraints in `AppDbContext`; pairing and membership checks are enforced by handlers.
 
+The absent foreign keys are also what makes device-identity rotation possible: a device's rows are re-pointed at a replacement identity and the old row is deleted in the same transaction, which a database-level `ON DELETE CASCADE` would turn into a teardown of the live session it was meant to preserve. Referential integrity during deletion is therefore enforced by the retention sweep's ordered graph delete plus an orphan sweep, not by the schema. Every table above carries a collection timestamp, and nothing in it survives past the retention ceiling — see [data retention](data-retention.md).
+
 ## Session and peer topology
 
 A device only sees sessions it publishes or participates in. A publisher is expected to create one peer connection per viewer.

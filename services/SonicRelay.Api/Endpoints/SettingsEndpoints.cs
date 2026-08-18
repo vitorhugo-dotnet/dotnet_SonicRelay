@@ -61,7 +61,10 @@ public static class SettingsEndpoints
                 RelayMode = effective?.RelayMode ?? RelayModes.Automatic,
                 TurnUris = effective?.TurnUris ?? [],
                 TurnUsername = effective?.TurnUsername,
-                TurnCredential = effective?.TurnCredential
+                TurnCredential = effective?.TurnCredential,
+                // Retention runs off CreatedAt, so a row seeded from a paired device inherits
+                // that device's original collection time rather than starting a fresh 90 days.
+                CreatedAt = effective?.CreatedAt ?? time.GetUtcNow()
             };
             db.RelayDeviceSettings.Add(row);
         }

@@ -108,6 +108,15 @@ builder.Services.AddAuthentication().AddJwtBearer("DeviceBearer", jwtOptions =>
 
 builder.Services.AddSingleton<SessionCleanupService>();
 builder.Services.AddSingleton<IHostedService>(services => services.GetRequiredService<SessionCleanupService>());
+// Data retention (issue #44): nothing SonicRelay collects may stay identifiable beyond the
+// 90 days declared in the Google Play Data Safety entry. See docs/data-retention.md.
+builder.Services.Configure<DataRetentionOptions>(
+    builder.Configuration.GetSection(DataRetentionOptions.SectionName));
+builder.Services.AddSingleton<SonicRelay.Api.Observability.DataRetentionMetrics>();
+builder.Services.AddSingleton<DataRetentionState>();
+builder.Services.AddScoped<DeviceIdentityRotationService>();
+builder.Services.AddSingleton<DataRetentionService>();
+builder.Services.AddSingleton<IHostedService>(services => services.GetRequiredService<DataRetentionService>());
 builder.Services.AddRateLimiter(options =>
 {
     options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
@@ -147,7 +156,9 @@ builder.Services.Configure<WebSocketOptions>(options =>
     options.KeepAliveInterval = TimeSpan.FromSeconds(20));
 builder.Services.AddHealthChecks()
     .AddNpgSql(builder.Configuration.GetConnectionString("Postgres") ?? string.Empty, name: "postgres")
-    .AddRedis(builder.Configuration["Redis:ConnectionString"] ?? string.Empty, name: "redis");
+    .AddRedis(builder.Configuration["Redis:ConnectionString"] ?? string.Empty, name: "redis")
+    // Surfaces a cleanup that stopped running, long before anything could reach 90 days.
+    .AddCheck<DataRetentionHealthCheck>("data-retention", tags: ["retention"]);
 builder.Services.AddAuthorization(options =>
 {
     options.AddPolicy("DeviceAuthenticated", policy =>

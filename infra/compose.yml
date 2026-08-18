@@ -17,6 +17,11 @@ services:
       DeviceIdentity__CredentialHmacKey: ${DEVICE_IDENTITY_CREDENTIAL_HMAC_KEY:-change-this-device-credential-hmac-key}
       DeviceIdentity__PairingCodeHmacKey: ${DEVICE_IDENTITY_PAIRING_CODE_HMAC_KEY:-change-this-pairing-code-hmac-key}
       DeviceIdentity__TokenSigningKey: ${DEVICE_IDENTITY_TOKEN_SIGNING_KEY:-change-this-device-token-signing-key-32-bytes-minimum}
+      # Data retention (issue #44). The defaults already satisfy the "deleted within 90 days"
+      # Data Safety declaration; these are here so an operator can see them, not tune them up.
+      DataRetention__MaxRetentionDays: ${DATA_RETENTION_MAX_DAYS:-90}
+      DataRetention__CleanupIntervalHours: ${DATA_RETENTION_CLEANUP_INTERVAL_HOURS:-24}
+      DataRetention__DeviceIdentityRotationDays: ${DATA_RETENTION_DEVICE_ROTATION_DAYS:-60}
     depends_on:
       postgres:
         condition: service_healthy
