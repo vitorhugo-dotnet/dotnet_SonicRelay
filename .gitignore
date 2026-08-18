@@ -4,3 +4,7 @@ TestResults/
 *.user
 *.suo
 .worktrees/
+
+# Public demo room audio tracks (operator-provided, not source-controlled)
+infra/demo-tracks/*
+!infra/demo-tracks/.gitkeep

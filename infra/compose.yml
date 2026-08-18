@@ -22,11 +22,22 @@ services:
       DataRetention__MaxRetentionDays: ${DATA_RETENTION_MAX_DAYS:-90}
       DataRetention__CleanupIntervalHours: ${DATA_RETENTION_CLEANUP_INTERVAL_HOURS:-24}
       DataRetention__DeviceIdentityRotationDays: ${DATA_RETENTION_DEVICE_ROTATION_DAYS:-60}
+      # Public demo room (not yet implemented in application code — see
+      # infra/README or the project README Configuration section). These
+      # only reserve the operational surface: enabling the flag has no
+      # effect until the backend feature lands.
+      PublicDemo__Enabled: ${PUBLIC_DEMO_ENABLED:-false}
+      PublicDemo__MaxListeners: ${PUBLIC_DEMO_MAX_LISTENERS:-30}
+      PublicDemo__TracksPath: /data/demo-tracks
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    volumes:
+      # Royalty-free/ambient audio tracks played in the public demo room.
+      # Point DEMO_TRACKS_HOST_PATH at a host directory containing them.
+      - ${DEMO_TRACKS_HOST_PATH:-./demo-tracks}:/data/demo-tracks:ro
     networks:
       - sonicrelay
     restart: unless-stopped
@@ -73,6 +84,30 @@ services:
     command: ["-c", "/etc/coturn/turnserver.conf"]
     volumes:
       - ./coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    networks:
+      - sonicrelay
+    restart: unless-stopped
+
+  # Placeholder for the official public-demo-room publisher process. Not yet
+  # implemented (services/SonicRelay.DemoPublisher doesn't exist): this only
+  # wires up the profile, credential and audio-tracks volume ahead of that
+  # work, so `docker compose --profile demo up --build` is the single command
+  # that will bring it up once the project is scaffolded. It never starts
+  # with the default `dev`/`prod` profiles.
+  demo-publisher:
+    profiles: ["demo"]
+    container_name: sonicrelay-demo-publisher
+    build:
+      context: ../services/SonicRelay.DemoPublisher
+    environment:
+      PublicDemo__ApiUrl: ${PUBLIC_DEMO_API_URL:-http://api:8080}
+      PublicDemo__PublisherCredential: ${PUBLIC_DEMO_PUBLISHER_CREDENTIAL:?set PUBLIC_DEMO_PUBLISHER_CREDENTIAL in .env}
+      PublicDemo__TracksPath: /data/demo-tracks
+    volumes:
+      - ${DEMO_TRACKS_HOST_PATH:-./demo-tracks}:/data/demo-tracks:ro
+    depends_on:
+      api:
+        condition: service_started
     networks:
       - sonicrelay
     restart: unless-stopped

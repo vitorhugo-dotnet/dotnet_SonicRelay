@@ -94,6 +94,21 @@ Set the following high-entropy secrets in production deployments (outside Git):
 
 See [device identity configuration](docs/device-identity.md#configuration) for details on the `DeviceIdentity:*` keys.
 
+### Public demo room (infra scaffolding)
+
+`infra/compose.yml` reserves the operational surface for a future public demo
+room — a listen-only session the official infrastructure keeps broadcasting so
+new users can hear audio without installing the Windows publisher first. The
+backend feature and the `services/SonicRelay.DemoPublisher` process are **not
+implemented yet**; enabling these settings currently has no effect.
+
+| Variable | Purpose |
+| --- | --- |
+| `PUBLIC_DEMO_ENABLED` | Feature flag for the public demo room (`PublicDemo:Enabled`). Defaults to `false`. |
+| `PUBLIC_DEMO_MAX_LISTENERS` | Listener cap for the demo room (`PublicDemo:MaxListeners`). Defaults to `30`. |
+| `DEMO_TRACKS_HOST_PATH` | Host directory with the royalty-free/ambient audio tracks the demo publisher plays, mounted read-only into `api` and `demo-publisher` at `/data/demo-tracks`. Defaults to `infra/demo-tracks`. |
+| `PUBLIC_DEMO_API_URL`, `PUBLIC_DEMO_PUBLISHER_CREDENTIAL` | Only needed to run the `demo-publisher` service (`docker compose --profile demo up --build`). The credential is server-side only — it must never ship inside the mobile app. |
+
 `DeviceIdentity:TokenSigningKey` (and the other `DeviceIdentity:*` keys above) are required in any real deployment: sessions, signaling, TURN credential issuance, device bootstrap and pairing all authenticate exclusively via `DeviceBearer` and have no fallback authentication path.
 
 ## Documentation
