@@ -78,7 +78,8 @@ Current limitation: successful join lookup does not consume a code. A code can b
 - Defaults per 60-second window are create `10`, join `10`, rotate `5`, device-bootstrap `10`, device-token `10`, pairing-create `10`, pairing-complete `10`.
 - Signaling frames are limited to 64 KiB text messages.
 - Signaling logs record routing metadata only; SDP and ICE payloads are not logged by the endpoint.
-- Readiness checks include PostgreSQL and Redis; liveness does not expose dependency state.
+- Readiness checks include PostgreSQL, Redis and the data-retention cleanup; liveness does not expose dependency state.
+- Every persisted record is hard-deleted automatically at 82 days from collection — measured from `CreatedAt`/`JoinedAt`, never from last activity — keeping all data inside the 90 days declared in the Google Play Data Safety entry even after backup retention. Device identities are additionally replaced by a new `deviceId` at 60 days so no single identifier persists indefinitely. See [data retention](data-retention.md).
 
 ## Secrets and deployment
 
@@ -95,7 +96,7 @@ Current limitation: successful join lookup does not consume a code. A code can b
 - `PUT /api/settings/relay` is the one exception to the "devices only manage themselves" rule above: it requires only `device:manage`, but the row it mutates is global relay/coturn configuration shared by every device, not the caller's own device. Any bootstrapped device (bootstrap is anonymous and only IP-rate-limited) can toggle `disableFallback` for every other device or point every other device's TURN traffic at attacker-controlled infrastructure. This is accepted for the current single-operator, self-hosted deployment model (there is no admin/account tier to scope it to) and should be revisited if this backend ever serves multiple independent operators/accounts.
 - The live signaling registry is in memory, preventing safe multi-replica routing without sticky sessions or a backplane.
 - TURN uses static configuration; temporary per-session TURN credentials are not issued by the API.
-- The API-only CI deployment does not provision PostgreSQL, Redis, coturn, TLS or backups.
+- The API-only CI deployment does not provision PostgreSQL, Redis, coturn, TLS or backups. Backup and log retention are therefore operator-owned, and both are load-bearing for the 90-day deletion guarantee: see [data retention](data-retention.md#backups).
 - No explicit request-body limit is documented for HTTP endpoints beyond server defaults.
 
 Before internet-facing production use, close these gaps, restrict network exposure, configure backups/restore testing, rotate secrets, and add operational alerting.

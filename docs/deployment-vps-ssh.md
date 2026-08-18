@@ -68,9 +68,18 @@ Swagger__Enabled=false
 DeviceIdentity__CredentialHmacKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET
 DeviceIdentity__PairingCodeHmacKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET
 DeviceIdentity__TokenSigningKey=CHANGE_ME_TO_A_HIGH_ENTROPY_SECRET_32_BYTES_MIN
+
+DataRetention__Enabled=true
+DataRetention__MaxRetentionDays=90
+DataRetention__CleanupIntervalHours=24
+DataRetention__DeviceIdentityRotationDays=60
+# Must equal the PostgreSQL backup window this host actually keeps.
+DataRetention__BackupRetentionDays=7
 ```
 
 All three `DeviceIdentity__*` keys are required: sessions, signaling and TURN credential issuance authenticate exclusively via the `DeviceBearer` scheme and have no fallback, so device bootstrap and token issuance fail without them. See [device identity configuration](device-identity.md#configuration).
+
+The `DataRetention__*` block defaults are already correct and are shown here so they are visible, not so they get tuned. They are what makes SonicRelay's Google Play Data Safety declaration ("user data is automatically deleted within 90 days") true, so raising `MaxRetentionDays` above 90, setting `BackupRetentionDays` lower than the backup window this host really keeps, or turning `Enabled` off all break a public statement made to users. Read [data retention](data-retention.md) before changing any of them.
 
 The compose service binds to loopback by default. Put nginx, Caddy or another TLS reverse proxy in front of `127.0.0.1:8080` and forward WebSocket upgrades for `/ws/signaling`.
 
@@ -111,7 +120,15 @@ curl --fail http://127.0.0.1:8080/health/live
 curl --fail http://127.0.0.1:8080/health/ready
 ```
 
-`/health/live` proves the API process responds. `/health/ready` additionally proves PostgreSQL and Redis are reachable.
+`/health/live` proves the API process responds. `/health/ready` additionally proves PostgreSQL and Redis are reachable and that the data-retention cleanup has run recently.
+
+Also confirm the retention sweep is alive — it is the only thing keeping the 90-day deletion guarantee true, and it fails silently:
+
+```bash
+curl -s http://127.0.0.1:8080/metrics | grep sonicrelay_data_retention
+```
+
+`sonicrelay_data_retention_last_success_timestamp` must be non-zero and advance at least daily. Load `observability/prometheus/sonicrelay-alerts.yml` so a stalled cleanup pages instead of going unnoticed.
 
 From outside the VPS, verify TLS and the reverse proxy:
 
@@ -129,6 +146,12 @@ IMAGE=ghcr.io/vitorhugo-java/sonicrelay-api:sha-<previous-commit> ./deploy.sh
 ```
 
 Database rollback is separate. Do not downgrade an image across an incompatible schema change without a tested migration rollback or restored backup.
+
+## Backups and restore
+
+This deployment path does not provision PostgreSQL or its backups, but the backup policy is not optional: data deleted from the primary database at 82 days still lives inside any backup taken before the deletion, so an unbounded backup window silently breaks the 90-day guarantee. Keep the backup window at `DataRetention__BackupRetentionDays` (7 days by default), encrypt backups at rest, and treat the two values as a pair — changing one means changing the other.
+
+A restore reintroduces data that had already expired. After any restore, run a retention pass before serving traffic again; restarting the API is enough, since the sweep runs at boot. Verify with `sonicrelay_data_retention_last_success_timestamp` before reopening the reverse proxy. Restore drills belong on a non-production copy that is destroyed afterwards — a forgotten restore environment is an uncontrolled store of user data. See [data retention](data-retention.md#backups).
 
 ## Full infrastructure stack
 

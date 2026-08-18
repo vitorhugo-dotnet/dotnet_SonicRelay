@@ -7,7 +7,7 @@ This document describes routes mapped by the current API. Unless marked public, 
 | Method | Route | Auth | Behavior |
 | --- | --- | --- | --- |
 | `GET` | `/health/live` | Public | Process liveness only; excludes registered dependency checks. |
-| `GET` | `/health/ready` | Public | Checks PostgreSQL and Redis. |
+| `GET` | `/health/ready` | Public | Checks PostgreSQL, Redis and the data-retention cleanup. |
 
 Swagger is enabled by default only in Development, or when `Swagger:Enabled=true`.
 
@@ -41,8 +41,25 @@ Bootstrap response:
 Token response:
 
 ```json
-{ "accessToken": "<jwt>", "expiresAt": "2026-08-01T14:05:00Z", "scopes": ["session:create", "..."] }
+{
+  "accessToken": "<jwt>",
+  "expiresAt": "2026-08-01T14:05:00Z",
+  "scopes": ["session:create", "..."],
+  "deviceId": "<uuid>",
+  "credentialVersion": 1,
+  "rotatedCredentialSecret": null
+}
 ```
+
+`deviceId` is the device the returned token authenticates. It is normally the id
+the caller sent, but once an identity reaches the retention rotation deadline
+this call replaces it: `deviceId` is then a **new** id and
+`rotatedCredentialSecret` carries the matching new secret, shown exactly once.
+A client that receives a non-null `rotatedCredentialSecret` must persist both
+values in place of what it had stored — the previous device id and secret no
+longer exist and their next use returns `401`. A client that ignores the field
+simply re-bootstraps and re-pairs later. See
+[data retention](data-retention.md#device-identity).
 
 Valid `deviceType`/`platform` pairs are `windows_publisher`/`windows` and `flutter_viewer`/`android|ios`. Revoked devices cannot bootstrap new tokens or create, join or connect to sessions.
 

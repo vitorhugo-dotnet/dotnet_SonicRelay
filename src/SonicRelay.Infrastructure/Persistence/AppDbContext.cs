@@ -26,6 +26,8 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasKey(x => x.Id);
             entity.Property(x => x.Status).HasMaxLength(32).IsRequired();
             entity.HasIndex(x => new { x.SourceDeviceId, x.Status }).HasDatabaseName("ix_stream_sessions_source_device_status");
+            // The data-retention sweep (issue #44) scans by collection time, not by status.
+            entity.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_stream_sessions_created_at");
         });
 
         modelBuilder.Entity<SessionParticipant>(entity =>
@@ -42,6 +44,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasIndex(x => new { x.SessionId, x.DeviceId, x.Role })
                 .IsUnique()
                 .HasDatabaseName("ux_session_participants_session_device_role");
+            entity.HasIndex(x => x.JoinedAt).HasDatabaseName("ix_session_participants_joined_at");
         });
 
         modelBuilder.Entity<SignalingEvent>(entity =>
@@ -50,6 +53,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.HasKey(x => x.Id);
             entity.Property(x => x.EventType).HasMaxLength(64).IsRequired();
             entity.HasIndex(x => new { x.SessionId, x.CreatedAt }).HasDatabaseName("ix_signaling_events_session_created_at");
+            entity.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_signaling_events_created_at");
         });
 
         modelBuilder.Entity<DeviceIdentity>(entity =>
@@ -62,6 +66,9 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.CredentialSecretHash).HasMaxLength(128).IsRequired();
             entity.Property(x => x.Status).HasMaxLength(16).IsRequired();
             entity.HasIndex(x => x.Status).HasDatabaseName("ix_device_identities_status");
+            // Both the retention sweep and the identity-rotation deadline are measured from
+            // CreatedAt, which is the moment the identifier was collected.
+            entity.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_device_identities_created_at");
         });
 
         modelBuilder.Entity<PairingChallenge>(entity =>
@@ -71,6 +78,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.CodeHash).HasMaxLength(128).IsRequired();
             entity.HasIndex(x => x.PublisherDeviceId).HasDatabaseName("ix_pairing_challenges_publisher_device_id");
             entity.HasIndex(x => x.ExpiresAt).HasDatabaseName("ix_pairing_challenges_expires_at");
+            entity.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_pairing_challenges_created_at");
         });
 
         modelBuilder.Entity<DevicePairing>(entity =>
@@ -80,6 +88,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.Status).HasMaxLength(16).IsRequired();
             entity.HasIndex(x => x.PublisherDeviceId).HasDatabaseName("ix_device_pairings_publisher_device_id");
             entity.HasIndex(x => x.ViewerDeviceId).HasDatabaseName("ix_device_pairings_viewer_device_id");
+            entity.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_device_pairings_created_at");
         });
 
         modelBuilder.Entity<RelayDeviceSettings>(entity =>
@@ -89,6 +98,7 @@ public sealed class AppDbContext(DbContextOptions<AppDbContext> options) : DbCon
             entity.Property(x => x.RelayMode).HasMaxLength(20).IsRequired();
             entity.Property(x => x.TurnUsername).HasMaxLength(256);
             entity.Property(x => x.TurnCredential).HasMaxLength(256);
+            entity.HasIndex(x => x.CreatedAt).HasDatabaseName("ix_relay_device_settings_created_at");
         });
     }
 }

@@ -22,6 +22,9 @@ pairing (issue #26 Phase 3).
    requests and rejects already-issued tokens on their next authorized
    request, without waiting for expiry.
 
+Step 2 is also where a device identity is retired. See
+[Identity rotation](#identity-rotation) below.
+
 ## Pairing
 
 1. A publisher device with a `pairing:create`-scoped token calls
@@ -56,6 +59,7 @@ brute-forcing regardless of rate-limit keying granularity.
 | `DeviceIdentity:AccessTokenMinutes` | Access token lifetime (default 5). |
 | `DeviceIdentity:PairingCodeTtlMinutes` | Pairing challenge TTL (default 5). |
 | `DeviceIdentity:PairingMaxAttempts` | Max failed pairing attempts before a challenge is rejected (default 5). |
+| `DataRetention:DeviceIdentityRotationDays` | Age at which a device identity is replaced by a new one (default 60). |
 
 Set high-entropy values for `CredentialHmacKey`, `PairingCodeHmacKey`, and
 `TokenSigningKey` outside Git, the same way `Sessions:CodeHmacKey` is handled.
@@ -104,6 +108,31 @@ no active pairing — the API returns the same invalid/expired-code response,
 so a caller cannot distinguish "session doesn't exist" from "you're not
 paired with its publisher." Existing participants may reconnect after
 pairing revocation until the session ends; revocation only blocks new joins.
+
+## Identity rotation
+
+A `deviceId` is a collected identifier, and SonicRelay tells Google Play users
+that collected data is deleted automatically within 90 days. Refreshing
+`LastSeenAt` or rotating the credential secret does not help: the same original
+identifier stays in the database. So the identity itself expires.
+
+At `DataRetention:DeviceIdentityRotationDays` (default 60 days from
+`CreatedAt`), the next `POST /api/devices/token` call transparently replaces the
+identity: a new row with a new `deviceId` and a new credential secret is
+created, everything that referenced the old id is re-pointed at it, and the old
+row is hard-deleted in the same transaction. The response carries the new
+`deviceId` plus a `rotatedCredentialSecret`, which the client must store in
+place of what it had. Pairings and live sessions survive the rotation; the user
+sees nothing.
+
+Nothing links the old identity to the new one — no `previousDeviceId` column, no
+audit row, no log line naming either id — so the retired identifier cannot be
+reconstructed from what remains.
+
+A device that stops calling the API is not rotated. It is deleted outright by
+the retention sweep, and its next request returns `401`, requiring a fresh
+bootstrap and re-pairing. [Data retention](data-retention.md) covers the full
+policy, the sweep and its configuration.
 
 ## Revocation and lifecycle
 

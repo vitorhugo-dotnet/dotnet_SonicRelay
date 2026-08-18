@@ -14,6 +14,12 @@ public sealed class SonicRelayApiFactory : WebApplicationFactory<Program>
     private readonly string _databaseName = $"sonicrelay-tests-{Guid.NewGuid()}";
     private readonly IReadOnlyDictionary<string, string?> _settings;
 
+    /// <summary>
+    /// Replaces <see cref="TimeProvider.System"/> for tests that need to reason about
+    /// retention deadlines without sleeping. Left null, the app uses the real clock.
+    /// </summary>
+    internal TimeProvider? TimeProviderOverride { get; init; }
+
     public SonicRelayApiFactory() : this(new Dictionary<string, string?>())
     {
     }
@@ -28,6 +34,9 @@ public sealed class SonicRelayApiFactory : WebApplicationFactory<Program>
         builder.UseSetting("Sessions:CodeTtlMinutes", "10");
         builder.UseSetting("Sessions:CodeHmacKey", "integration-test-session-code-key");
         builder.UseSetting("Sessions:CleanupEnabled", "false");
+        // The retention sweep is exercised deliberately by the tests that care about it; left
+        // running it would delete fixtures out from under every other test.
+        builder.UseSetting("DataRetention:Enabled", "false");
         builder.UseSetting("RateLimits:CreateSession:PermitLimit", "100");
         builder.UseSetting("RateLimits:JoinSession:PermitLimit", "100");
         builder.UseSetting("RateLimits:RotateCode:PermitLimit", "100");
@@ -50,6 +59,11 @@ public sealed class SonicRelayApiFactory : WebApplicationFactory<Program>
                 options.UseInMemoryDatabase(_databaseName));
             services.RemoveAll<IDistributedCache>();
             services.AddDistributedMemoryCache();
+            if (TimeProviderOverride is { } timeProvider)
+            {
+                services.RemoveAll<TimeProvider>();
+                services.AddSingleton(timeProvider);
+            }
         });
     }
 }

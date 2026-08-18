@@ -60,3 +60,43 @@ groups:
         annotations:
           summary: "TURN TCP/TLS heavily used"
           description: "More than 50% of selected transports are TURN TCP/TLS over 15m — UDP may be blocked or degraded."
+
+  # Data retention (issue #44). SonicRelay tells Google Play users that their data is deleted
+  # automatically within 90 days; a cleanup that quietly stops running turns that statement
+  # false without any other symptom, so these fire long before the ceiling could be crossed.
+  - name: sonicrelay-data-retention
+    rules:
+      - alert: SonicRelayDataRetentionStalled
+        # No successful pass in 48h. The sweep runs daily and deletes at 89 days, so this leaves
+        # roughly a day of margin to fix the job before data could reach 90 days.
+        expr: time() - sonicrelay_data_retention_last_success_timestamp > 172800
+        for: 30m
+        labels:
+          severity: critical
+          service: sonicrelay
+        annotations:
+          summary: "Data retention cleanup has stopped running"
+          description: "No successful data-retention pass for over 48h. The 90-day deletion guarantee declared in the Google Play Data Safety entry is at risk."
+
+      - alert: SonicRelayDataRetentionNeverRan
+        # The series only exists once a pass has succeeded, so its absence means the job has
+        # never completed since startup — a misconfiguration rather than a transient fault.
+        expr: absent(sonicrelay_data_retention_last_success_timestamp)
+        for: 2h
+        labels:
+          severity: critical
+          service: sonicrelay
+        annotations:
+          summary: "Data retention cleanup has never completed"
+          description: "No successful data-retention pass has been recorded since startup. Check DataRetention:Enabled and the database connection."
+
+      - alert: SonicRelayDataRetentionFailures
+        # Individual passes are allowed to fail and retry; a sustained failure rate is not.
+        expr: increase(sonicrelay_data_retention_failures_total[6h]) > 2
+        for: 15m
+        labels:
+          severity: warning
+          service: sonicrelay
+        annotations:
+          summary: "Data retention cleanup is failing"
+          description: "More than two data-retention passes failed in the last 6h ({{ $value | printf \"%.0f\" }})."

@@ -21,6 +21,7 @@ This repository contains only the backend and its infrastructure.
 | Sessions | Implemented | Create, list, read, join, rotate code, end and background expiry/cleanup, all owned by device identity. |
 | WebSocket signaling | Implemented | Authenticated participant validation and in-process, participant-targeted routing. |
 | Device revocation | Implemented | `POST /api/devices/revoke` and credential rotation (`POST /api/devices/rotate-credential`); no separate account-deletion flow exists since devices are not owned by a human account. |
+| Data retention | Implemented | Everything collected is hard-deleted automatically well inside 90 days, and device identities rotate to a new `deviceId` before the ceiling. See [data retention](docs/data-retention.md). |
 | Observability | Implemented | Prometheus `/metrics`, client WebRTC stats ingestion (`POST /api/webrtc/stats`), structured signaling logs, Grafana dashboard and alerts. See [observability](docs/observability.md). |
 | PostgreSQL | Implemented | Device-identity, pairing, session, participant and signaling-event schema plus migrations. |
 | Redis | Implemented | Expiring HMAC-derived session-code lookup. |
@@ -29,7 +30,7 @@ This repository contains only the backend and its infrastructure.
 
 ASP.NET Core Identity (email/password accounts, `/register`, `/login`, `/refresh`, admin/self-service account deletion) was removed in issue #26 Phase 4 once both clients migrated to device identity; there is no human user account model or admin user-management panel in this API (see [ADR 0006](docs/adr/0006-remove-identity.md)).
 
-See the [client integration protocol](docs/protocol.md) for exact routes and WebRTC signaling flows, the [beginner guide](docs/beginner-guide.md) for a plain-language introduction, and [Security](docs/security.md) for implemented controls and known gaps.
+See the [client integration protocol](docs/protocol.md) for exact routes and WebRTC signaling flows, the [beginner guide](docs/beginner-guide.md) for a plain-language introduction, [Security](docs/security.md) for implemented controls and known gaps, and [data retention](docs/data-retention.md) for what is stored, for how long, and what deletes it.
 
 ### Pairing authorization
 

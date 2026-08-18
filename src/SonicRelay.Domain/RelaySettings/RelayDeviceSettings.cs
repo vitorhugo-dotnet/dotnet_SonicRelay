@@ -14,6 +14,14 @@ public sealed class RelayDeviceSettings
     public string[] TurnUris { get; set; } = [];
     public string? TurnUsername { get; set; }
     public string? TurnCredential { get; set; }
+
+    /// <summary>
+    /// When this row was first collected. Retention is measured from here and never from
+    /// <see cref="UpdatedAt"/>: editing a relay override must not buy the original data
+    /// another 90 days (issue #44).
+    /// </summary>
+    public DateTimeOffset CreatedAt { get; set; }
+
     public DateTimeOffset UpdatedAt { get; set; }
 }
 

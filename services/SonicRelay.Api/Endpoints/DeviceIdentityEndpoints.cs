@@ -47,7 +47,8 @@ public static class DeviceIdentityEndpoints
     }
 
     private static async Task<IResult> TokenAsync(DeviceTokenRequest request,
-        DeviceCredentialService credentials, AppDbContext db, TimeProvider time, CancellationToken ct)
+        DeviceCredentialService credentials, DeviceIdentityRotationService rotation,
+        AppDbContext db, TimeProvider time, CancellationToken ct)
     {
         var device = await db.DeviceIdentities.SingleOrDefaultAsync(x => x.Id == request.DeviceId, ct);
         if (device is null || device.Status != DeviceIdentityStatuses.Active
@@ -57,9 +58,23 @@ public static class DeviceIdentityEndpoints
         }
 
         device.LastSeenAt = time.GetUtcNow();
+
+        // Token exchange is the one call every device makes regularly, which makes it the place
+        // to retire an identifier that is approaching the retention ceiling. On rotation the
+        // caller is handed a new device id and credential and the old identity is gone
+        // (issue #44, docs/data-retention.md).
+        var rotated = await rotation.RotateIfDueAsync(device, ct);
+        if (rotated is not { } outcome) return Results.Unauthorized();
+
         await db.SaveChangesAsync(ct);
-        var (token, expiresAt) = credentials.IssueAccessToken(device);
-        return Results.Ok(new DeviceTokenResponse(token, expiresAt, DeviceCredentialService.ScopesFor(device.DeviceType)));
+        var (token, expiresAt) = credentials.IssueAccessToken(outcome.Device);
+        return Results.Ok(new DeviceTokenResponse(
+            token,
+            expiresAt,
+            DeviceCredentialService.ScopesFor(outcome.Device.DeviceType),
+            outcome.Device.Id,
+            outcome.Device.CredentialVersion,
+            outcome.RotatedCredentialSecret));
     }
 
     private static async Task<IResult> RotateAsync(RotateCredentialRequest request, ClaimsPrincipal principal,
