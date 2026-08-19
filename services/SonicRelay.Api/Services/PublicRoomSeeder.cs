@@ -61,6 +61,17 @@ public sealed class PublicRoomSeeder
             };
             db.StreamSessions.Add(session);
         }
+        else if (session.Status != SessionStatuses.Active)
+        {
+            // Same idea as the device reactivation above: the public room's session row is a fixed
+            // well-known GUID, so once something terminal happens to it (SessionCleanupService
+            // ending an idle session, an expiry sweep) nothing would ever create it again and the
+            // radio would stay dead — the signaling upgrade rejects terminal sessions, and this
+            // seeder runs on every connect attempt but previously only handled "row missing".
+            session.Status = SessionStatuses.Active;
+            session.EndedAt = null;
+            session.StartedAt = now;
+        }
 
         var publisherParticipant = await db.SessionParticipants.SingleOrDefaultAsync(x =>
             x.SessionId == PublicSessionId && x.DeviceId == VirtualPublisherDeviceId

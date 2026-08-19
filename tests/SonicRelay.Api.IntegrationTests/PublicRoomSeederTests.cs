@@ -64,6 +64,34 @@ public sealed class PublicRoomSeederTests
         Assert.Equal(DeviceIdentityStatuses.Active, reloaded.Status);
     }
 
+    /// <summary>
+    /// The public session's id is a fixed GUID, so nothing ever re-creates it: once
+    /// SessionCleanupService (or an expiry sweep) marks it terminal, the signaling upgrade rejects
+    /// every connection with 410 and the room is dead forever unless the seeder revives the row.
+    /// </summary>
+    [Theory]
+    [InlineData(SessionStatuses.Ended)]
+    [InlineData(SessionStatuses.Expired)]
+    public async Task EnsureSeededAsync_revives_a_terminal_session(string terminalStatus)
+    {
+        await using var db = CreateDb();
+        var seeder = new PublicRoomSeeder();
+        await seeder.EnsureSeededAsync(db, TimeProvider.System, CancellationToken.None);
+        var session = await db.StreamSessions.SingleAsync(x => x.Id == PublicRoomSeeder.PublicSessionId);
+        session.Status = terminalStatus;
+        session.EndedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+
+        var revived = await seeder.EnsureSeededAsync(db, TimeProvider.System, CancellationToken.None);
+
+        Assert.Equal(SessionStatuses.Active, revived.Status);
+        Assert.Null(revived.EndedAt);
+        Assert.NotNull(revived.StartedAt);
+        var reloaded = await db.StreamSessions.SingleAsync(x => x.Id == PublicRoomSeeder.PublicSessionId);
+        Assert.Equal(SessionStatuses.Active, reloaded.Status);
+        Assert.Null(reloaded.EndedAt);
+    }
+
     [Fact]
     public async Task IssuePublisherTokenAsync_mints_a_token_for_the_seeded_device()
     {

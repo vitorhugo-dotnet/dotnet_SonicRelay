@@ -17,6 +17,11 @@
     <PackageReference Include="Swashbuckle.AspNetCore" Version="9.0.6" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Lets the integration tests drive the publisher's signaling handshake handlers directly
+         (see PublicRoomPublisherServiceTests) without widening the public surface. -->
+    <InternalsVisibleTo Include="SonicRelay.Api.IntegrationTests" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="..\..\src\SonicRelay.Infrastructure\SonicRelay.Infrastructure.csproj" />
     <ProjectReference Include="..\..\src\SonicRelay.Infrastructure.VirtualPublisher\SonicRelay.Infrastructure.VirtualPublisher.csproj" />
   </ItemGroup>
