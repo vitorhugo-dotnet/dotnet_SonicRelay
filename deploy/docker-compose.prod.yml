@@ -5,8 +5,14 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      PUBLICROOM__ENABLED: "${PUBLICROOM_ENABLED:-false}"
+      PUBLICROOM__TRACKSPATH: "/app/tracks"
+      PUBLICROOM__MAXVIEWERS: "${PUBLICROOM_MAXVIEWERS:-20}"
     expose:
       - "8080"
+    volumes:
+      - ${PUBLICROOM_TRACKS_HOST_PATH:-./tracks}:/app/tracks:ro
     networks:
       - infra_network
 
