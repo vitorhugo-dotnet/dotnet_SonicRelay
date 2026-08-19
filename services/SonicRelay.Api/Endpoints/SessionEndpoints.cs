@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using SonicRelay.Api.Services;
 using SonicRelay.Application.Abstractions;
 using SonicRelay.Domain.DeviceIdentities;
 using SonicRelay.Domain.Sessions;
@@ -278,7 +279,14 @@ public static class SessionEndpoints
             return await ResumeParticipantAsync(existing, session, device, db, loggerFactory, ct);
         }
 
-        if (!await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
+        // The public radio room's virtual publisher is intentionally open: any authenticated
+        // device may listen without ever pairing with it, real-device pairing only gates a real
+        // publisher's session. Requiring a pairing here would make this dependent on the
+        // best-effort auto-pair side effect in PublicRoomEndpoints.GetAsync running first —
+        // fragile under retries, offline joins, or a client that reaches this session id without
+        // ever calling GET /api/public-room.
+        var isPublicRoomSession = session.SourceDeviceId == PublicRoomSeeder.VirtualPublisherDeviceId;
+        if (!isPublicRoomSession && !await HasActivePairingAsync(db, session.SourceDeviceId, device.Id, ct))
             return NotPaired();
 
         // Viewers mid-reconnect-grace-period still hold their slot, otherwise a new viewer
