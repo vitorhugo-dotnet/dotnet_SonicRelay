@@ -34,4 +34,13 @@ public sealed class PcmAudioConverterTests
     {
         Assert.Empty(PcmAudioConverter.ToS16(ReadOnlySpan<byte>.Empty, WebRtcSourceSampleFormat.Pcm16));
     }
+
+    // Ported from the desktop suite (SonicRelay.Windows.WebRtc.Tests.PcmAudioConverterTests).
+    [Fact]
+    public void ToS16_ignores_trailing_partial_sample_bytes()
+    {
+        // 5 bytes = two whole S16 samples plus one dangling byte.
+        var result = PcmAudioConverter.ToS16(new byte[] { 1, 0, 2, 0, 9 }, WebRtcSourceSampleFormat.Pcm16);
+        Assert.Equal(new short[] { 1, 2 }, result);
+    }
 }
