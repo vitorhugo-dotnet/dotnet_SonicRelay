@@ -16,16 +16,21 @@ public interface IMp3Decoder
 /// Plays every <c>*.mp3</c> file in a directory in alphabetical order, forever. A
 /// file that fails to decode is logged and skipped for that pass; the loop moves
 /// on to the next file rather than stopping the radio. An empty or missing
-/// directory yields no frames at all (the caller treats that as "idle").
+/// directory, or a pass where every file failed to decode, produces no frames —
+/// the source logs a warning and waits <see cref="IdleRetryDelay"/> before
+/// re-scanning, rather than terminating or hot-spinning the CPU. Iteration only
+/// ends when the supplied <see cref="CancellationToken"/> is cancelled.
 /// </summary>
 public sealed class Mp3TrackSource(string directoryPath, IMp3Decoder decoder, ILogger<Mp3TrackSource> logger)
 {
+    private static readonly TimeSpan IdleRetryDelay = TimeSpan.FromSeconds(5);
+
     public IEnumerable<Mp3Frame> ReadForever(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
             var files = ListTracksSorted();
-            if (files.Count == 0) yield break;
+            var yieldedAny = false;
 
             foreach (var file in files)
             {
@@ -42,21 +47,34 @@ public sealed class Mp3TrackSource(string directoryPath, IMp3Decoder decoder, IL
                     continue;
                 }
 
-                while (true)
+                using (frames)
                 {
-                    Mp3Frame frame;
-                    try
+                    while (true)
                     {
-                        if (!frames.MoveNext()) break;
-                        frame = frames.Current;
+                        Mp3Frame frame;
+                        try
+                        {
+                            if (!frames.MoveNext()) break;
+                            frame = frames.Current;
+                        }
+                        catch (Exception exception)
+                        {
+                            logger.LogWarning(exception, "Skipping unreadable track {TrackPath}", file);
+                            break;
+                        }
+                        yieldedAny = true;
+                        yield return frame;
                     }
-                    catch (Exception exception)
-                    {
-                        logger.LogWarning(exception, "Skipping unreadable track {TrackPath}", file);
-                        break;
-                    }
-                    yield return frame;
                 }
+            }
+
+            if (!yieldedAny)
+            {
+                // Nothing playable this pass (empty/missing directory, or every file failed to
+                // decode) — back off instead of hot-spinning the CPU and flooding logs, and keep
+                // checking: a valid file dropped in later must be picked up without a restart.
+                logger.LogWarning("No playable *.mp3 files found in {DirectoryPath}; idling", directoryPath);
+                cancellationToken.WaitHandle.WaitOne(IdleRetryDelay);
             }
         }
     }

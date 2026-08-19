@@ -77,12 +77,36 @@ public sealed class Mp3TrackSourceTests
     }
 
     [Fact]
+    public void ReadForever_preserves_the_decoded_frames_sample_rate_and_channel_count()
+    {
+        var dir = CreateTrackDirectory("a.mp3");
+        var decoder = new FakeDecoder(new()
+        {
+            ["a.mp3"] = () => [new Mp3Frame([1, 2], 44100, 1)],
+        });
+        var source = new Mp3TrackSource(dir, decoder, NullLogger<Mp3TrackSource>.Instance);
+
+        var frame = source.ReadForever(CancellationToken.None).Take(1).ToList().Single();
+
+        Assert.Equal(44100, frame.SampleRate);
+        Assert.Equal(1, frame.Channels);
+    }
+
+    [Fact]
     public void ReadForever_yields_nothing_for_an_empty_directory()
     {
         var dir = CreateTrackDirectory();
         var source = new Mp3TrackSource(dir, new FakeDecoder(new()), NullLogger<Mp3TrackSource>.Instance);
 
-        var frames = source.ReadForever(CancellationToken.None).Take(1).ToList();
+        // The directory is (and stays) empty, so ReadForever never has a frame to yield. It
+        // idles internally (waiting up to IdleRetryDelay between re-scans) rather than ending
+        // the sequence, so we cancel shortly after starting to unblock the wait and let the
+        // iterator's own "while (!cancellationToken.IsCancellationRequested)" end enumeration
+        // normally. ToList() draining to completion with zero items proves no frame was ever
+        // produced before that happened.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        var frames = source.ReadForever(cts.Token).ToList();
 
         Assert.Empty(frames);
     }
@@ -93,7 +117,11 @@ public sealed class Mp3TrackSourceTests
         var missing = Path.Combine(Path.GetTempPath(), "sonicrelay-does-not-exist-" + Guid.NewGuid());
         var source = new Mp3TrackSource(missing, new FakeDecoder(new()), NullLogger<Mp3TrackSource>.Instance);
 
-        var frames = source.ReadForever(CancellationToken.None).Take(1).ToList();
+        // Same reasoning as the empty-directory case above: a missing directory also never
+        // yields a frame, so we cancel shortly after starting and drain to completion.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(200));
+
+        var frames = source.ReadForever(cts.Token).ToList();
 
         Assert.Empty(frames);
     }
