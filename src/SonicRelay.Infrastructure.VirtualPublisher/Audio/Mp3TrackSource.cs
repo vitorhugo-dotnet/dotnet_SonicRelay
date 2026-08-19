@@ -82,8 +82,20 @@ public sealed class Mp3TrackSource(string directoryPath, IMp3Decoder decoder, IL
     private List<string> ListTracksSorted()
     {
         if (!Directory.Exists(directoryPath)) return [];
-        return Directory.EnumerateFiles(directoryPath, "*.mp3")
-            .OrderBy(path => Path.GetFileName(path), StringComparer.Ordinal)
-            .ToList();
+        try
+        {
+            return Directory.EnumerateFiles(directoryPath, "*.mp3")
+                .OrderBy(path => Path.GetFileName(path), StringComparer.Ordinal)
+                .ToList();
+        }
+        catch (Exception exception) when (exception is UnauthorizedAccessException or IOException)
+        {
+            // An existing-but-unreadable directory (bad permissions, a transient mount issue,
+            // etc.) must fall back to the same "idle and retry" behavior as a missing directory
+            // rather than throwing out of the iterator — the caller only guards per-file decode
+            // failures, not enumeration itself.
+            logger.LogWarning(exception, "Could not list *.mp3 files in {DirectoryPath}", directoryPath);
+            return [];
+        }
     }
 }

@@ -15,6 +15,12 @@ public sealed class PublicRoomSignalingClient(Uri baseUrl, string accessToken) :
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private readonly ClientWebSocket socket = new();
+    // ClientWebSocket throws InvalidOperationException on overlapping SendAsync calls. Once a
+    // viewer is added, SendAsync can be invoked concurrently from two places: the receive-loop's
+    // message handler (e.g. sending a webrtc.offer) and a peer's fire-and-forget ICE-candidate
+    // callback (LocalIceCandidateReady -> Task.Run -> SendAsync). This lock serializes every
+    // outbound send, matching how SignalingWebSocketEndpoint serializes its own socket writes.
+    private readonly SemaphoreSlim sendLock = new(1, 1);
     private Guid sessionId;
     private bool disposed;
 
@@ -50,7 +56,15 @@ public sealed class PublicRoomSignalingClient(Uri baseUrl, string accessToken) :
             payload = JsonSerializer.SerializeToElement(payload, JsonOptions)
         };
         var bytes = JsonSerializer.SerializeToUtf8Bytes(envelope, JsonOptions);
-        await socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+        await sendLock.WaitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await socket.SendAsync(bytes, WebSocketMessageType.Text, true, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            sendLock.Release();
+        }
     }
 
     public async Task RunReceiveLoopAsync(CancellationToken ct)
@@ -119,5 +133,6 @@ public sealed class PublicRoomSignalingClient(Uri baseUrl, string accessToken) :
             }
         }
         socket.Dispose();
+        sendLock.Dispose();
     }
 }
