@@ -2,10 +2,14 @@ using Microsoft.Extensions.Logging;
 
 namespace SonicRelay.Infrastructure.VirtualPublisher.Audio;
 
+/// <summary>One decoded chunk of interleaved S16 PCM samples, plus the sample rate and
+/// channel count they were decoded at so downstream resampling/mixing can be correct.</summary>
+public readonly record struct Mp3Frame(short[] Samples, int SampleRate, int Channels);
+
 /// <summary>Decodes one audio file into a sequence of interleaved S16 PCM frames.</summary>
 public interface IMp3Decoder
 {
-    IEnumerable<short[]> DecodeFrames(string filePath);
+    IEnumerable<Mp3Frame> DecodeFrames(string filePath);
 }
 
 /// <summary>
@@ -16,7 +20,7 @@ public interface IMp3Decoder
 /// </summary>
 public sealed class Mp3TrackSource(string directoryPath, IMp3Decoder decoder, ILogger<Mp3TrackSource> logger)
 {
-    public IEnumerable<short[]> ReadForever(CancellationToken cancellationToken)
+    public IEnumerable<Mp3Frame> ReadForever(CancellationToken cancellationToken)
     {
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -27,7 +31,7 @@ public sealed class Mp3TrackSource(string directoryPath, IMp3Decoder decoder, IL
             {
                 if (cancellationToken.IsCancellationRequested) yield break;
 
-                IEnumerator<short[]>? frames;
+                IEnumerator<Mp3Frame>? frames;
                 try
                 {
                     frames = decoder.DecodeFrames(file).GetEnumerator();
@@ -40,7 +44,7 @@ public sealed class Mp3TrackSource(string directoryPath, IMp3Decoder decoder, IL
 
                 while (true)
                 {
-                    short[] frame;
+                    Mp3Frame frame;
                     try
                     {
                         if (!frames.MoveNext()) break;

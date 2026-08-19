@@ -12,11 +12,12 @@ public sealed class NLayerMp3Decoder : IMp3Decoder
 {
     private const int SamplesPerChunkPerChannel = 960; // 20 ms at 48 kHz
 
-    public IEnumerable<short[]> DecodeFrames(string filePath)
+    public IEnumerable<Mp3Frame> DecodeFrames(string filePath)
     {
         using var stream = File.OpenRead(filePath);
         using var mpegFile = new MpegFile(stream);
         var channels = mpegFile.Channels;
+        var sampleRate = mpegFile.SampleRate;
         var chunkFloats = new float[SamplesPerChunkPerChannel * channels];
 
         while (true)
@@ -29,7 +30,7 @@ public sealed class NLayerMp3Decoder : IMp3Decoder
             {
                 pcm[i] = (short)Math.Round(Math.Clamp(chunkFloats[i], -1f, 1f) * short.MaxValue);
             }
-            yield return pcm;
+            yield return new Mp3Frame(pcm, sampleRate, channels);
         }
     }
 }

@@ -8,10 +8,10 @@ public sealed class Mp3TrackSourceTests
 {
     private sealed class FakeDecoder : IMp3Decoder
     {
-        private readonly Dictionary<string, Func<IEnumerable<short[]>>> byPath;
-        public FakeDecoder(Dictionary<string, Func<IEnumerable<short[]>>> byPath) => this.byPath = byPath;
+        private readonly Dictionary<string, Func<IEnumerable<Mp3Frame>>> byPath;
+        public FakeDecoder(Dictionary<string, Func<IEnumerable<Mp3Frame>>> byPath) => this.byPath = byPath;
 
-        public IEnumerable<short[]> DecodeFrames(string filePath) => byPath[Path.GetFileName(filePath)]();
+        public IEnumerable<Mp3Frame> DecodeFrames(string filePath) => byPath[Path.GetFileName(filePath)]();
     }
 
     private static string CreateTrackDirectory(params string[] fileNames)
@@ -29,9 +29,9 @@ public sealed class Mp3TrackSourceTests
         var order = new List<string>();
         var decoder = new FakeDecoder(new()
         {
-            ["a.mp3"] = () => { order.Add("a"); return [[1, 2]]; },
-            ["b.mp3"] = () => { order.Add("b"); return [[3, 4]]; },
-            ["c.mp3"] = () => { order.Add("c"); return [[5, 6]]; },
+            ["a.mp3"] = () => { order.Add("a"); return [new Mp3Frame([1, 2], 48000, 2)]; },
+            ["b.mp3"] = () => { order.Add("b"); return [new Mp3Frame([3, 4], 48000, 2)]; },
+            ["c.mp3"] = () => { order.Add("c"); return [new Mp3Frame([5, 6], 48000, 2)]; },
         });
         var source = new Mp3TrackSource(dir, decoder, NullLogger<Mp3TrackSource>.Instance);
 
@@ -48,8 +48,8 @@ public sealed class Mp3TrackSourceTests
         var visits = new List<string>();
         var decoder = new FakeDecoder(new()
         {
-            ["a.mp3"] = () => { visits.Add("a"); return [[1]]; },
-            ["b.mp3"] = () => { visits.Add("b"); return [[2]]; },
+            ["a.mp3"] = () => { visits.Add("a"); return [new Mp3Frame([1], 48000, 2)]; },
+            ["b.mp3"] = () => { visits.Add("b"); return [new Mp3Frame([2], 48000, 2)]; },
         });
         var source = new Mp3TrackSource(dir, decoder, NullLogger<Mp3TrackSource>.Instance);
 
@@ -65,15 +65,15 @@ public sealed class Mp3TrackSourceTests
         var decoder = new FakeDecoder(new()
         {
             ["a.mp3"] = () => throw new InvalidOperationException("corrupt"),
-            ["b.mp3"] = () => [[9]],
+            ["b.mp3"] = () => [new Mp3Frame([9], 48000, 2)],
         });
         var source = new Mp3TrackSource(dir, decoder, NullLogger<Mp3TrackSource>.Instance);
 
         var frames = source.ReadForever(CancellationToken.None).Take(2).ToList();
 
         Assert.Equal(2, frames.Count);
-        Assert.Equal((short)9, frames[0][0]);
-        Assert.Equal((short)9, frames[1][0]); // looped back to b.mp3 again, a.mp3 skipped both times
+        Assert.Equal((short)9, frames[0].Samples[0]);
+        Assert.Equal((short)9, frames[1].Samples[0]); // looped back to b.mp3 again, a.mp3 skipped both times
     }
 
     [Fact]

@@ -956,13 +956,16 @@ public sealed class PublicRoomPublisherService(
         var receiveLoop = signaling.RunReceiveLoopAsync(stoppingToken);
         try
         {
-            const int sampleRate = 48000, channels = 2;
             foreach (var frame in tracks.ReadForever(stoppingToken))
             {
                 if (stoppingToken.IsCancellationRequested) break;
-                var bytes = new byte[frame.Length * 2];
-                Buffer.BlockCopy(frame, 0, bytes, 0, bytes.Length);
-                var audioFrame = new WebRtcAudioFrame(bytes, sampleRate, channels);
+                var bytes = new byte[frame.Samples.Length * 2];
+                Buffer.BlockCopy(frame.Samples, 0, bytes, 0, bytes.Length);
+                // frame.SampleRate/Channels come from the MP3's real native format
+                // (NLayerMp3Decoder reports it), not a hardcoded 48kHz/stereo assumption —
+                // OpusFrameAccumulator (inside VirtualPublisherPeerConnection) resamples
+                // and up/down-mixes from whatever this actually is.
+                var audioFrame = new WebRtcAudioFrame(bytes, frame.SampleRate, frame.Channels);
                 foreach (var peer in peersByParticipantId.Values.ToList())
                 {
                     try
