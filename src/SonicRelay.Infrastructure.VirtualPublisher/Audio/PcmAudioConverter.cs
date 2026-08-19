@@ -25,7 +25,7 @@ public static class PcmAudioConverter
                 for (var i = 0; i < floats.Length; i++)
                 {
                     var clamped = Math.Clamp(floats[i], -1f, 1f);
-                    samples[i] = (short)Math.Round(clamped >= 0 ? clamped * short.MaxValue : clamped * -short.MinValue);
+                    samples[i] = (short)Math.Round(clamped * short.MaxValue);
                 }
                 return samples;
             default:

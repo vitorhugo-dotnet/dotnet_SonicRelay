@@ -26,7 +26,7 @@ public sealed class PcmAudioConverterTests
 
         var result = PcmAudioConverter.ToS16(bytes, WebRtcSourceSampleFormat.IeeeFloat32);
 
-        Assert.Equal([short.MaxValue, short.MinValue, (short)0, short.MaxValue], result);
+        Assert.Equal([short.MaxValue, (short)(-short.MaxValue), (short)0, short.MaxValue], result);
     }
 
     [Fact]
