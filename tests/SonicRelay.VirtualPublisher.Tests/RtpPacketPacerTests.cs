@@ -17,6 +17,15 @@ public sealed class RtpPacketPacerTests
 
         var received = await sent.Task.WaitAsync(TimeSpan.FromSeconds(2));
         Assert.Equal(new byte[] { 1, 2, 3 }, received);
+
+        // PacketsSent increments right after send() returns inside PumpAsync, which can
+        // race with the awaited continuation above (both are triggered from the same
+        // send(packet) call) — poll briefly instead of asserting immediately.
+        var deadline = DateTime.UtcNow.AddSeconds(1);
+        while (pacer.PacketsSent == 0 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(10);
+        }
         Assert.Equal(1, pacer.PacketsSent);
     }
 
