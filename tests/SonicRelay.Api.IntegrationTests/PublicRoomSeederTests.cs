@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using SonicRelay.Api.Services;
 using SonicRelay.Domain.DeviceIdentities;
 using SonicRelay.Domain.Sessions;
@@ -61,5 +62,27 @@ public sealed class PublicRoomSeederTests
 
         var reloaded = await db.DeviceIdentities.SingleAsync(x => x.Id == PublicRoomSeeder.VirtualPublisherDeviceId);
         Assert.Equal(DeviceIdentityStatuses.Active, reloaded.Status);
+    }
+
+    [Fact]
+    public async Task IssuePublisherTokenAsync_mints_a_token_for_the_seeded_device()
+    {
+        await using var db = CreateDb();
+        var seeder = new PublicRoomSeeder();
+        await seeder.EnsureSeededAsync(db, TimeProvider.System, CancellationToken.None);
+        var options = Options.Create(new DeviceIdentityOptions
+        {
+            TokenSigningKey = "integration-test-device-token-signing-key-32bytes-min",
+            Issuer = "sonicrelay-tests",
+            Audience = "sonicrelay-tests",
+            AccessTokenMinutes = 60
+        });
+        var credentials = new DeviceCredentialService(options, TimeProvider.System);
+
+        var (token, expiresAt) = await seeder.IssuePublisherTokenAsync(
+            db, credentials, TimeProvider.System, CancellationToken.None);
+
+        Assert.False(string.IsNullOrWhiteSpace(token));
+        Assert.True(expiresAt > DateTimeOffset.UtcNow);
     }
 }

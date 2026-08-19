@@ -81,4 +81,11 @@ public sealed class PublicRoomSeeder
         await db.SaveChangesAsync(ct);
         return session;
     }
+
+    public async Task<(string AccessToken, DateTimeOffset ExpiresAt)> IssuePublisherTokenAsync(
+        AppDbContext db, DeviceCredentialService credentials, TimeProvider time, CancellationToken ct)
+    {
+        var device = await db.DeviceIdentities.SingleAsync(x => x.Id == VirtualPublisherDeviceId, ct);
+        return credentials.IssueAccessToken(device);
+    }
 }
