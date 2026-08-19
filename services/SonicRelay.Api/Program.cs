@@ -80,6 +80,8 @@ builder.Services.PostConfigure<TurnOptions>(options =>
     }
 });
 builder.Services.Configure<DeviceIdentityOptions>(builder.Configuration.GetSection("DeviceIdentity"));
+builder.Services.Configure<PublicRoomOptions>(builder.Configuration.GetSection(PublicRoomOptions.SectionName));
+builder.Services.AddSingleton<PublicRoomSeeder>();
 builder.Services.AddSingleton<DeviceCredentialService>();
 builder.Services.AddSingleton<PairingChallengeService>();
 builder.Services.AddScoped<IAuthorizationHandler, DeviceScopeAuthorizationHandler>();
@@ -226,6 +228,7 @@ app.MapSessionEndpoints();
 app.MapWebRtcEndpoints();
 app.MapSettingsEndpoints();
 app.MapSignalingWebSocketEndpoint();
+app.MapPublicRoomEndpoints();
 
 app.Run();
 
