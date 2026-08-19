@@ -138,7 +138,18 @@ desprezível (early-return, sem loop rodando).
 | `SonicRelay.Infrastructure.VirtualPublisher` (novo projeto) | solution `dotnet_SonicRelay` | Pipeline de áudio: `Mp3TrackSource`, wrapper de peer connection SIPSorcery, encoder Opus (Concentus), `RtpPacketPacer` |
 | `PublicRoomPublisherService : BackgroundService` | `services/SonicRelay.Api/Services/` | Orquestra: garante sessão pública, conecta como publisher via loopback, roda o loop de reprodução |
 | Device identity de sistema | seed automático no startup | Identidade usada pelo publisher virtual para autenticar como qualquer device publisher |
-| `GET /api/public-room` (novo endpoint) | `Endpoints/PublicRoomEndpoints.cs` | Descoberta: retorna `{ enabled, sessionId, maxViewers }` para o client saber se a rádio está ativa e qual `sessionId` usar no `joinById` — sem isso o Flutter não teria como descobrir a sessão pública. Requer o mesmo auth de device já usado pelos demais endpoints de sessão. |
+| `GET /api/public-room` (novo endpoint) | `Endpoints/PublicRoomEndpoints.cs` | Descoberta **+ auto-pareamento**: retorna `{ enabled, sessionId, maxViewers }` e, como efeito colateral idempotente, garante um `DevicePairing` `Active` entre o device chamador e o device do publisher virtual (get-or-create). Requer o mesmo auth de device já usado pelos demais endpoints de sessão. |
+
+> **Correção pós-design (achada ao mapear o código real):** `JoinByIdAsync`
+> (`SessionEndpoints.cs`) dispensa o **código**, mas continua exigindo um
+> `DevicePairing` com `Status = Active` entre o device do viewer e o device
+> do publisher (`HasActivePairingAsync`) — é essa pairing que autoriza o
+> join, não a ausência de código. Sem isso, todo join na rádio pública
+> retornaria `403 not_paired`. A correção é o auto-pareamento acima: reusa o
+> mesmo modelo `DevicePairing` que o pareamento manual via QR code já usa
+> (`PairingEndpoints.CompleteAsync`), então nada em `SessionEndpoints.cs` ou
+> `PairingEndpoints.cs` precisa mudar — o publisher virtual só passa a ter
+> pairings criadas automaticamente em vez de via challenge/QR.
 
 ## Fluxo de dados
 
@@ -151,7 +162,9 @@ desprezível (early-return, sem loop rodando).
    decodifica em PCM → converte/encoda em Opus → envia via RTP para cada
    peer connection ativa.
 4. **Viewer entra:** Flutter chama `GET /api/public-room` para descobrir o
-   `sessionId` ativo → chama `joinById` nessa sessão (sem código) → conecta
+   `sessionId` ativo (o endpoint também garante o `DevicePairing` ativo com
+   o publisher virtual, get-or-create) → chama `joinById` nessa sessão (sem
+   código) → conecta
    em `/ws/signaling` → `viewer.ready` → publisher virtual detecta
    o novo participante, abre uma peer connection SIPSorcery dedicada, envia
    `webrtc.offer` → handshake padrão (`webrtc.answer`, ICE candidates) →
